@@ -280,6 +280,29 @@ static inline int display_read(const struct device *dev, const uint16_t x,
 }
 
 /**
+ * @brief Indicates that all writes for the current frame are done
+ *
+ * Can be used to present all previous writes simultaneously, for
+ * double buffered or latched displays.
+ *
+ * @param dev Pointer to device structure
+ *
+ * @retval 0 on success else negative errno code.
+ */
+static inline int display_finalize_frame(const struct device *dev)
+{
+	struct display_driver_api *api =
+		(struct display_driver_api *)dev->api;
+
+    if (api->finalize_frame == NULL) {
+		return 0;
+	}
+
+	return api->finalize_frame(dev);
+}
+
+
+/**
  * @brief Get pointer to framebuffer for direct access
  *
  * @param dev Pointer to device structure
