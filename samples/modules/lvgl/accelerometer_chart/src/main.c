@@ -90,7 +90,7 @@ int main(void)
 
 	while (1) {
 		uint32_t sleep_ms = lv_timer_handler();
-		k_msleep(MAX(sleep_ms, INT32_MAX));
+		k_msleep(MIN(sleep_ms, INT32_MAX));
 	}
 
 	return 0;

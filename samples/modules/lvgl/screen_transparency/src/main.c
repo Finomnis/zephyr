@@ -20,6 +20,13 @@ static void initialize_gui()
 {
 	lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_TRANSP, LV_PART_MAIN);
 	lv_obj_set_style_bg_opa(lv_layer_bottom(), LV_OPA_TRANSP, LV_PART_MAIN);
+	lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x000000), LV_PART_MAIN);
+
+	/*Create a white label, set its text and align it to the center*/
+	lv_obj_t *label = lv_label_create(lv_screen_active());
+	lv_label_set_text(label, "Hello world");
+	lv_obj_set_style_text_color(lv_screen_active(), lv_color_hex(0xffffff), LV_PART_MAIN);
+	lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 }
 
 int main(void)
@@ -55,7 +62,7 @@ int main(void)
 
 	while (1) {
 		uint32_t sleep_ms = lv_timer_handler();
-		k_msleep(MAX(sleep_ms, INT32_MAX));
+		k_msleep(MIN(sleep_ms, INT32_MAX));
 	}
 
 	return 0;

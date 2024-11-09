@@ -62,7 +62,7 @@ int main(void)
 
 	while (1) {
 		uint32_t sleep_ms = lv_timer_handler();
-		k_msleep(MAX(sleep_ms, INT32_MAX));
+		k_msleep(MIN(sleep_ms, INT32_MAX));
 #ifdef CONFIG_LV_Z_DEMO_RENDER_SCENE_DYNAMIC
 		if (sys_timepoint_expired(next_scene_switch)) {
 			cur_scene = (cur_scene + 1) % _LV_DEMO_RENDER_SCENE_NUM;
