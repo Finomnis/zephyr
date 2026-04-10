@@ -44,7 +44,57 @@ STATS_NAME_END(smp_svr_stats);
 /* Define an instance of the stats group. */
 STATS_SECT_DECL(smp_svr_stats) smp_svr_stats;
 
-SETTINGS_STATIC_HANDLER_DEFINE(smp_svr, "smp_svr", NULL, NULL, NULL, NULL);
+static uint8_t setting_foo = 69;
+static uint16_t setting_bar = 420;
+
+static int settings_handle_get(const char *name, char *val, int val_len_max)
+{
+	const char *next;
+
+	if (settings_name_steq(name, "foo", &next) && !next) {
+		val_len_max = MIN(val_len_max, sizeof(setting_foo));
+		memcpy(val, &setting_foo, val_len_max);
+		return val_len_max;
+	}
+	if (settings_name_steq(name, "bar", &next) && !next) {
+		val_len_max = MIN(val_len_max, sizeof(setting_bar));
+		memcpy(val, &setting_bar, val_len_max);
+		return val_len_max;
+	}
+
+	return -ENOENT;
+}
+
+static int settings_handle_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	const char *next;
+	size_t name_len;
+	int rc;
+
+	name_len = settings_name_next(name, &next);
+
+	if (!next) {
+		if (!strncmp(name, "foo", name_len)) {
+			if (len != sizeof(setting_foo)) {
+				return -EINVAL;
+			}
+			rc = read_cb(cb_arg, &setting_foo, sizeof(setting_foo));
+			return 0;
+		}
+		if (!strncmp(name, "bar", name_len)) {
+			if (len != sizeof(setting_bar)) {
+				return -EINVAL;
+			}
+			rc = read_cb(cb_arg, &setting_bar, sizeof(setting_bar));
+			return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(smp_svr, "smp_svr", settings_handle_get, settings_handle_set, NULL,
+			       NULL);
 
 #ifdef CONFIG_MCUMGR_GRP_FS
 FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(cstorage);
