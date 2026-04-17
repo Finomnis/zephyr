@@ -28,12 +28,14 @@ west build -b nrf52840dongle/nrf52840/bare \
     samples/subsys/mgmt/mcumgr/smp_svr \
     --sysbuild \
     -- \
-    -DEXTRA_CONF_FILE="cdc.conf;fs.conf;shell-mgmt.conf" \
+    -DEXTRA_CONF_FILE="bt.conf;cdc.conf;fs.conf;shell-mgmt.conf" \
+    -DEXTRA_DTC_OVERLAY_FILE="usb.overlay" \
     -DCONFIG_RTC=y \
     -DCONFIG_THREAD_MONITOR=y \
     -DCONFIG_THREAD_RUNTIME_STATS=y \
     -DCONFIG_SCHED_THREAD_USAGE=y \
     -DCONFIG_SHELL_BACKEND_SERIAL=n \
+    -DCONFIG_MCUMGR_TRANSPORT_SHELL=n \
     -DCONFIG_FILE_SYSTEM_SHELL=y \
     -DCONFIG_MCUMGR_TRANSPORT_NETBUF_SIZE=4096 \
     -DCONFIG_MCUMGR_TRANSPORT_WORKQUEUE_STACK_SIZE=8192 \
