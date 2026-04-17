@@ -45,15 +45,14 @@ static int mcumgr_serial_extract_len(struct mcumgr_serial_rx_ctxt *rx_ctxt)
 	return 0;
 }
 
-static int mcumgr_serial_decode_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt,
-				     const uint8_t *frag, int frag_len)
+static int mcumgr_serial_decode_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt, const uint8_t *frag,
+				     int frag_len)
 {
 	size_t dec_len;
 	int rc;
 
-	rc = base64_decode(rx_ctxt->nb->data + rx_ctxt->nb->len,
-				   net_buf_tailroom(rx_ctxt->nb), &dec_len,
-				   frag, frag_len);
+	rc = base64_decode(rx_ctxt->nb->data + rx_ctxt->nb->len, net_buf_tailroom(rx_ctxt->nb),
+			   &dec_len, frag, frag_len);
 	if (rc != 0) {
 		return -EINVAL;
 	}
@@ -66,8 +65,8 @@ static int mcumgr_serial_decode_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt,
 
 #if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_RAW_BINARY_NON_SMP_OVER_CONSOLE)
 static inline bool mcumgr_serial_process_frag_raw(struct mcumgr_serial_rx_ctxt *rx_ctxt,
-							     const uint8_t *frag, int frag_len,
-							     struct smp_hdr *rec_hdr)
+						  const uint8_t *frag, int frag_len,
+						  struct smp_hdr *rec_hdr)
 {
 	uint16_t total_size;
 
@@ -135,7 +134,7 @@ struct net_buf *mcumgr_serial_process_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt
 		}
 	}
 
-#if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE) && \
+#if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE) &&                                \
 	defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_RAW_BINARY_NON_SMP_OVER_CONSOLE)
 	if (rx_ctxt->raw_transport == true) {
 #endif
@@ -144,7 +143,7 @@ struct net_buf *mcumgr_serial_process_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt
 			return NULL;
 		}
 #endif
-#if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE) && \
+#if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE) &&                                \
 	defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_RAW_BINARY_NON_SMP_OVER_CONSOLE)
 	} else {
 #endif
@@ -170,9 +169,7 @@ struct net_buf *mcumgr_serial_process_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt
 			return NULL;
 		}
 
-		rc = mcumgr_serial_decode_frag(rx_ctxt,
-					       frag + sizeof(op),
-					       frag_len - sizeof(op));
+		rc = mcumgr_serial_decode_frag(rx_ctxt, frag + sizeof(op), frag_len - sizeof(op));
 		if (rc != 0) {
 			mcumgr_serial_free_rx_ctxt(rx_ctxt);
 			return NULL;
@@ -204,7 +201,7 @@ struct net_buf *mcumgr_serial_process_frag(struct mcumgr_serial_rx_ctxt *rx_ctxt
 		/* Packet is complete; strip the CRC. */
 		rx_ctxt->nb->len -= 2U;
 #endif
-#if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE) && \
+#if defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_SMP_OVER_CONSOLE) &&                                \
 	defined(CONFIG_MCUMGR_TRANSPORT_SERIAL_HAS_RAW_BINARY_NON_SMP_OVER_CONSOLE)
 	}
 #endif
@@ -254,21 +251,24 @@ int mcumgr_serial_tx_pkt(const uint8_t *data, int len, mcumgr_serial_tx_cb cb)
 	int to_process;
 	int reminder;
 
-	/*
-	 * This is max input bytes that can be taken to the frame before encoding with Base64;
-	 * Base64 has three-to-four ratio, which means that for each three input bytes there are
-	 * going to be four bytes of output used. The frame starts with two byte marker and ends
-	 * with newline character, which are not encoded (this is the "-3" in calculation).
-	 */
-	int max_input = (((MCUMGR_SERIAL_MAX_FRAME - 3) >> 2) * 3);
-
 	/* Calculate the CRC16 checksum of the whole packet, prior to splitting it into frames */
 	crc = mcumgr_serial_calc_crc(data, len);
 
 	/* First frame marker */
 	u16 = sys_cpu_to_be16(MCUMGR_SERIAL_HDR_PKT);
 
+	/*
+	 * This is max input bytes that can be taken to the frame before encoding with
+	 * Base64; Base64 has three-to-four ratio, which means that for each three input
+	 * bytes there are going to be four bytes of output used. The frame starts with two
+	 * byte marker and ends with newline character, which are not encoded (this is the
+	 * "-3" in calculation).
+	 */
+	int max_input = (((MCUMGR_SERIAL_MAX_FRAME - 3) >> 2) * 3);
+
 	while (src_off < len) {
+
+		printk("--- Frame (%04x) ---\n", sys_be16_to_cpu(u16));
 		/* Send first frame or continuation frame marker */
 		rc = cb(&u16, sizeof(u16));
 		if (rc != 0) {
@@ -294,6 +294,8 @@ int mcumgr_serial_tx_pkt(const uint8_t *data, int len, mcumgr_serial_tx_cb cb)
 			++src_off;
 			/* One triple of allowed input already used */
 			max_input -= 3;
+
+			printk(" - Size (%d) + 1 byte\n", sys_be16_to_cpu(u16));
 		}
 
 		/*
@@ -304,6 +306,9 @@ int mcumgr_serial_tx_pkt(const uint8_t *data, int len, mcumgr_serial_tx_cb cb)
 		 */
 		to_process = MIN(max_input, len - src_off);
 		reminder = max_input - (len - src_off);
+
+		printk("%d,%d,%d,%d,%d\n", max_input, len, src_off, to_process, reminder);
+		// k_msleep(100);
 
 		if (reminder == 0 || reminder == 1) {
 			to_process -= 1;
@@ -334,6 +339,8 @@ int mcumgr_serial_tx_pkt(const uint8_t *data, int len, mcumgr_serial_tx_cb cb)
 			to_process -= 3;
 		}
 
+		printk("%d,%d\n", (int)last, len - src_off);
+
 		if (last) {
 			/*
 			 * Process the reminder bytes of the input buffer, after sending it in
@@ -351,6 +358,7 @@ int mcumgr_serial_tx_pkt(const uint8_t *data, int len, mcumgr_serial_tx_cb cb)
 
 				raw[1] = (crc & 0xff00) >> 8;
 				raw[2] = crc & 0x00ff;
+				printk("Transfer last byte\n");
 				rc = mcumgr_serial_tx_small(raw, 3, cb);
 				break;
 

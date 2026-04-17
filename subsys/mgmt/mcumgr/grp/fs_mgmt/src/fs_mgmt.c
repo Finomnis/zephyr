@@ -180,12 +180,10 @@ static bool fs_mgmt_file_rsp(zcbor_state_t *zse, int rc, uint64_t off)
 	bool ok = true;
 
 	if (IS_ENABLED(CONFIG_MCUMGR_SMP_LEGACY_RC_BEHAVIOUR) || rc != 0) {
-		ok = zcbor_tstr_put_lit(zse, "rc")	&&
-		     zcbor_int32_put(zse, rc);
+		ok = zcbor_tstr_put_lit(zse, "rc") && zcbor_int32_put(zse, rc);
 	}
 
-	return ok && zcbor_tstr_put_lit(zse, "off")	&&
-		     zcbor_uint64_put(zse, off);
+	return ok && zcbor_tstr_put_lit(zse, "off") && zcbor_uint64_put(zse, off);
 }
 
 /**
@@ -250,7 +248,7 @@ static int fs_mgmt_file_download(struct smp_streamer *ctxt)
 	zcbor_state_t *zse = ctxt->writer->zs;
 	zcbor_state_t *zsd = ctxt->reader->zs;
 	bool ok;
-	struct zcbor_string name = { 0 };
+	struct zcbor_string name = {0};
 	size_t decoded;
 
 	struct zcbor_map_decode_key_val fs_download_decode[] = {
@@ -284,8 +282,7 @@ static int fs_mgmt_file_download(struct smp_streamer *ctxt)
 	}
 
 	/* Check if this download is already in progress */
-	if (ctxt->smpt != fs_mgmt_ctxt.transport ||
-	    fs_mgmt_ctxt.state != STATE_DOWNLOAD ||
+	if (ctxt->smpt != fs_mgmt_ctxt.transport || fs_mgmt_ctxt.state != STATE_DOWNLOAD ||
 	    strcmp(path, fs_mgmt_ctxt.path)) {
 #if defined(CONFIG_MCUMGR_GRP_FS_FILE_ACCESS_HOOK)
 		/* Send request to application to check if access should be allowed or not */
@@ -342,8 +339,7 @@ static int fs_mgmt_file_download(struct smp_streamer *ctxt)
 		rc = fs_seek(&fs_mgmt_ctxt.file, off, FS_SEEK_SET);
 
 		if (rc != 0) {
-			ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS,
-					     FS_MGMT_ERR_FILE_SEEK_FAILED);
+			ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS, FS_MGMT_ERR_FILE_SEEK_FAILED);
 			(void)fs_mgmt_cleanup();
 			goto end;
 		}
@@ -357,7 +353,7 @@ static int fs_mgmt_file_download(struct smp_streamer *ctxt)
 
 	/* Read the requested chunk from the file. */
 	bytes_read = fs_read(&fs_mgmt_ctxt.file, file_data, MCUMGR_GRP_FS_DL_CHUNK_SIZE);
-
+	LOG_INF("Bytes read: %d", bytes_read);
 	if (bytes_read < 0) {
 		ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS, FS_MGMT_ERR_FILE_READ_FAILED);
 		(void)fs_mgmt_cleanup();
@@ -368,11 +364,10 @@ static int fs_mgmt_file_download(struct smp_streamer *ctxt)
 	fs_mgmt_ctxt.off += bytes_read;
 
 	/* Encode the response. */
-	ok = fs_mgmt_file_rsp(zse, MGMT_ERR_EOK, off)				&&
-	     zcbor_tstr_put_lit(zse, "data")					&&
-	     zcbor_bstr_encode_ptr(zse, file_data, bytes_read)			&&
-	     ((off != 0)							||
-		(zcbor_tstr_put_lit(zse, "len") && zcbor_uint64_put(zse, fs_mgmt_ctxt.len)));
+	ok = fs_mgmt_file_rsp(zse, MGMT_ERR_EOK, off) && zcbor_tstr_put_lit(zse, "data") &&
+	     zcbor_bstr_encode_ptr(zse, file_data, bytes_read) &&
+	     ((off != 0) ||
+	      (zcbor_tstr_put_lit(zse, "len") && zcbor_uint64_put(zse, fs_mgmt_ctxt.len)));
 
 	/* Closing errors can be ignored on downloads */
 	(void)fs_mgmt_upload_download_finish_check();
@@ -396,8 +391,8 @@ static int fs_mgmt_file_upload(struct smp_streamer *ctxt)
 	int rc;
 	zcbor_state_t *zse = ctxt->writer->zs;
 	zcbor_state_t *zsd = ctxt->reader->zs;
-	struct zcbor_string name = { 0 };
-	struct zcbor_string file_data = { 0 };
+	struct zcbor_string name = {0};
+	struct zcbor_string file_data = {0};
 	size_t decoded = 0;
 	ssize_t existing_file_size = 0;
 	size_t ctxt_off;
@@ -420,8 +415,8 @@ static int fs_mgmt_file_upload(struct smp_streamer *ctxt)
 	uint16_t err_group;
 #endif
 
-	ok = zcbor_map_decode_bulk(zsd, fs_upload_decode, ARRAY_SIZE(fs_upload_decode),
-				   &decoded) == 0;
+	ok = zcbor_map_decode_bulk(zsd, fs_upload_decode, ARRAY_SIZE(fs_upload_decode), &decoded) ==
+	     0;
 
 	if (!ok || off == ULLONG_MAX || name.len == 0 || name.len > (sizeof(file_name) - 1) ||
 	    (off == 0 && len == ULLONG_MAX)) {
@@ -436,8 +431,7 @@ static int fs_mgmt_file_upload(struct smp_streamer *ctxt)
 	}
 
 	/* Check if this upload is already in progress */
-	if (ctxt->smpt != fs_mgmt_ctxt.transport ||
-	    fs_mgmt_ctxt.state != STATE_UPLOAD ||
+	if (ctxt->smpt != fs_mgmt_ctxt.transport || fs_mgmt_ctxt.state != STATE_UPLOAD ||
 	    strcmp(file_name, fs_mgmt_ctxt.path)) {
 #if defined(CONFIG_MCUMGR_GRP_FS_FILE_ACCESS_HOOK)
 		/* Send request to application to check if access should be allowed or not */
@@ -512,8 +506,7 @@ static int fs_mgmt_file_upload(struct smp_streamer *ctxt)
 	if (off > 0 && off != fs_mgmt_ctxt.off) {
 		/* Offset mismatch, send file length, client needs to handle this */
 		ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS, FS_MGMT_ERR_FILE_OFFSET_NOT_VALID);
-		ok = zcbor_tstr_put_lit(zse, "len")		&&
-		     zcbor_uint64_put(zse, fs_mgmt_ctxt.off);
+		ok = zcbor_tstr_put_lit(zse, "len") && zcbor_uint64_put(zse, fs_mgmt_ctxt.off);
 
 		/* Because the client would most likely decide to abort and transfer and start
 		 * again, clean everything up and release the file handle so it can be used
@@ -554,8 +547,8 @@ static int fs_mgmt_file_upload(struct smp_streamer *ctxt)
 					goto end;
 				}
 
-				rc = fs_open(&fs_mgmt_ctxt.file, file_name, FS_O_CREATE |
-					     FS_O_WRITE);
+				rc = fs_open(&fs_mgmt_ctxt.file, file_name,
+					     FS_O_CREATE | FS_O_WRITE);
 			}
 
 			if (rc < 0) {
@@ -583,8 +576,7 @@ static int fs_mgmt_file_upload(struct smp_streamer *ctxt)
 		rc = fs_write(&fs_mgmt_ctxt.file, file_data.value, file_data.len);
 
 		if (rc < 0) {
-			ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS,
-					     FS_MGMT_ERR_FILE_WRITE_FAILED);
+			ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS, FS_MGMT_ERR_FILE_WRITE_FAILED);
 			(void)fs_mgmt_cleanup();
 			goto end;
 		}
@@ -624,7 +616,7 @@ static int fs_mgmt_file_status(struct smp_streamer *ctxt)
 	zcbor_state_t *zse = ctxt->writer->zs;
 	zcbor_state_t *zsd = ctxt->reader->zs;
 	bool ok;
-	struct zcbor_string name = { 0 };
+	struct zcbor_string name = {0};
 	size_t decoded;
 
 	struct zcbor_map_decode_key_val fs_status_decode[] = {
@@ -642,8 +634,8 @@ static int fs_mgmt_file_status(struct smp_streamer *ctxt)
 	uint16_t err_group;
 #endif
 
-	ok = zcbor_map_decode_bulk(zsd, fs_status_decode,
-		ARRAY_SIZE(fs_status_decode), &decoded) == 0;
+	ok = zcbor_map_decode_bulk(zsd, fs_status_decode, ARRAY_SIZE(fs_status_decode), &decoded) ==
+	     0;
 
 	if (!ok || name.len == 0 || name.len > (sizeof(path) - 1)) {
 		return MGMT_ERR_EINVAL;
@@ -678,12 +670,10 @@ static int fs_mgmt_file_status(struct smp_streamer *ctxt)
 
 	/* Encode the response. */
 	if (IS_ENABLED(CONFIG_MCUMGR_SMP_LEGACY_RC_BEHAVIOUR)) {
-		ok = zcbor_tstr_put_lit(zse, "rc")	&&
-		     zcbor_int32_put(zse, rc);
+		ok = zcbor_tstr_put_lit(zse, "rc") && zcbor_int32_put(zse, rc);
 	}
 
-	ok = ok && zcbor_tstr_put_lit(zse, "len")	&&
-		   zcbor_uint64_put(zse, file_len);
+	ok = ok && zcbor_tstr_put_lit(zse, "len") && zcbor_uint64_put(zse, file_len);
 
 end:
 	if (!ok) {
@@ -710,8 +700,8 @@ static int fs_mgmt_file_hash_checksum(struct smp_streamer *ctxt)
 	zcbor_state_t *zse = ctxt->writer->zs;
 	zcbor_state_t *zsd = ctxt->reader->zs;
 	bool ok;
-	struct zcbor_string type = { 0 };
-	struct zcbor_string name = { 0 };
+	struct zcbor_string type = {0};
+	struct zcbor_string name = {0};
 	size_t decoded;
 	struct fs_file_t file;
 	const struct fs_mgmt_hash_checksum_group *group = NULL;
@@ -735,7 +725,7 @@ static int fs_mgmt_file_hash_checksum(struct smp_streamer *ctxt)
 #endif
 
 	ok = zcbor_map_decode_bulk(zsd, fs_hash_checksum_decode,
-		ARRAY_SIZE(fs_hash_checksum_decode), &decoded) == 0;
+				   ARRAY_SIZE(fs_hash_checksum_decode), &decoded) == 0;
 
 	if (!ok || name.len == 0 || name.len > (sizeof(path) - 1) ||
 	    type.len > (sizeof(type_arr) - 1) || len == 0) {
@@ -755,8 +745,7 @@ static int fs_mgmt_file_hash_checksum(struct smp_streamer *ctxt)
 	group = fs_mgmt_hash_checksum_find_handler(type_arr);
 
 	if (group == NULL) {
-		ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS,
-				     FS_MGMT_ERR_CHECKSUM_HASH_NOT_FOUND);
+		ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS, FS_MGMT_ERR_CHECKSUM_HASH_NOT_FOUND);
 		goto end;
 	}
 
@@ -788,8 +777,8 @@ static int fs_mgmt_file_hash_checksum(struct smp_streamer *ctxt)
 		 * means no hash/checksum can be performed
 		 */
 		ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS,
-				     (file_len == 0 ? FS_MGMT_ERR_FILE_EMPTY :
-						      FS_MGMT_ERR_FILE_OFFSET_LARGER_THAN_FILE));
+				     (file_len == 0 ? FS_MGMT_ERR_FILE_EMPTY
+						    : FS_MGMT_ERR_FILE_OFFSET_LARGER_THAN_FILE));
 		goto end;
 	}
 
@@ -815,8 +804,7 @@ static int fs_mgmt_file_hash_checksum(struct smp_streamer *ctxt)
 		rc = fs_seek(&file, off, FS_SEEK_SET);
 
 		if (rc != 0) {
-			ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS,
-					     FS_MGMT_ERR_FILE_SEEK_FAILED);
+			ok = smp_add_cmd_err(zse, MGMT_GROUP_ID_FS, FS_MGMT_ERR_FILE_SEEK_FAILED);
 			fs_close(&file);
 			goto end;
 		}
@@ -834,16 +822,14 @@ static int fs_mgmt_file_hash_checksum(struct smp_streamer *ctxt)
 		goto end;
 	}
 
-	ok &= zcbor_tstr_put_lit(zse, "type")	&&
+	ok &= zcbor_tstr_put_lit(zse, "type") &&
 	      zcbor_tstr_put_term(zse, type_arr, sizeof(type_arr));
 
 	if (off != 0) {
-		ok &= zcbor_tstr_put_lit(zse, "off")	&&
-		      zcbor_uint64_put(zse, off);
+		ok &= zcbor_tstr_put_lit(zse, "off") && zcbor_uint64_put(zse, off);
 	}
 
-	ok &= zcbor_tstr_put_lit(zse, "len")	&&
-	      zcbor_uint64_put(zse, file_len)	&&
+	ok &= zcbor_tstr_put_lit(zse, "len") && zcbor_uint64_put(zse, file_len) &&
 	      zcbor_tstr_put_lit(zse, "output");
 
 	if (group->byte_string == true) {
@@ -868,8 +854,7 @@ static int fs_mgmt_file_hash_checksum(struct smp_streamer *ctxt)
 #endif
 #endif
 		} else {
-			LOG_ERR("Unable to handle numerical checksum size %u",
-				group->output_size);
+			LOG_ERR("Unable to handle numerical checksum size %u", group->output_size);
 
 			return MGMT_ERR_EUNKNOWN;
 		}
@@ -887,39 +872,39 @@ end:
 
 #if defined(CONFIG_MCUMGR_GRP_FS_CHECKSUM_HASH_SUPPORTED_CMD)
 /* Callback for supported hash/checksum types to encode details on one type into CBOR map */
-static void fs_mgmt_supported_hash_checksum_callback(
-					const struct fs_mgmt_hash_checksum_group *group,
-					void *user_data)
+static void
+fs_mgmt_supported_hash_checksum_callback(const struct fs_mgmt_hash_checksum_group *group,
+					 void *user_data)
 {
 	struct fs_mgmt_hash_checksum_iterator_info *ctx =
-			(struct fs_mgmt_hash_checksum_iterator_info *)user_data;
+		(struct fs_mgmt_hash_checksum_iterator_info *)user_data;
 
 	if (!ctx->ok) {
 		return;
 	}
 
-	ctx->ok = zcbor_tstr_encode_ptr(ctx->zse, group->group_name, strlen(group->group_name))	&&
-		  zcbor_map_start_encode(ctx->zse, HASH_CHECKSUM_SUPPORTED_COLUMNS_MAX)		&&
-		  zcbor_tstr_put_lit(ctx->zse, "format")					&&
-		  zcbor_uint32_put(ctx->zse, (uint32_t)group->byte_string)			&&
-		  zcbor_tstr_put_lit(ctx->zse, "size")						&&
-		  zcbor_uint32_put(ctx->zse, (uint32_t)group->output_size)			&&
+	ctx->ok = zcbor_tstr_encode_ptr(ctx->zse, group->group_name, strlen(group->group_name)) &&
+		  zcbor_map_start_encode(ctx->zse, HASH_CHECKSUM_SUPPORTED_COLUMNS_MAX) &&
+		  zcbor_tstr_put_lit(ctx->zse, "format") &&
+		  zcbor_uint32_put(ctx->zse, (uint32_t)group->byte_string) &&
+		  zcbor_tstr_put_lit(ctx->zse, "size") &&
+		  zcbor_uint32_put(ctx->zse, (uint32_t)group->output_size) &&
 		  zcbor_map_end_encode(ctx->zse, HASH_CHECKSUM_SUPPORTED_COLUMNS_MAX);
 }
 
 /**
  * Command handler: fs supported hash/checksum (read)
  */
-static int
-fs_mgmt_supported_hash_checksum(struct smp_streamer *ctxt)
+static int fs_mgmt_supported_hash_checksum(struct smp_streamer *ctxt)
 {
 	zcbor_state_t *zse = ctxt->writer->zs;
 	struct fs_mgmt_hash_checksum_iterator_info itr_ctx = {
 		.zse = zse,
 	};
 
-	itr_ctx.ok = zcbor_tstr_put_lit(zse, "types") &&
-	    zcbor_map_start_encode(zse, CONFIG_MCUMGR_GRP_FS_CHECKSUM_HASH_SUPPORTED_MAX_TYPES);
+	itr_ctx.ok =
+		zcbor_tstr_put_lit(zse, "types") &&
+		zcbor_map_start_encode(zse, CONFIG_MCUMGR_GRP_FS_CHECKSUM_HASH_SUPPORTED_MAX_TYPES);
 
 	if (!itr_ctx.ok) {
 		return MGMT_ERR_EMSGSIZE;
@@ -1004,32 +989,37 @@ static int fs_mgmt_translate_error_code(uint16_t err)
 #endif
 
 static const struct mgmt_handler fs_mgmt_handlers[] = {
-	[FS_MGMT_ID_FILE] = {
-		.mh_read = fs_mgmt_file_download,
-		.mh_write = fs_mgmt_file_upload,
-	},
+	[FS_MGMT_ID_FILE] =
+		{
+			.mh_read = fs_mgmt_file_download,
+			.mh_write = fs_mgmt_file_upload,
+		},
 #if defined(CONFIG_MCUMGR_GRP_FS_FILE_STATUS)
-	[FS_MGMT_ID_STAT] = {
-		.mh_read = fs_mgmt_file_status,
-		.mh_write = NULL,
-	},
+	[FS_MGMT_ID_STAT] =
+		{
+			.mh_read = fs_mgmt_file_status,
+			.mh_write = NULL,
+		},
 #endif
 #if defined(CONFIG_MCUMGR_GRP_FS_CHECKSUM_HASH)
-	[FS_MGMT_ID_HASH_CHECKSUM] = {
-		.mh_read = fs_mgmt_file_hash_checksum,
-		.mh_write = NULL,
-	},
+	[FS_MGMT_ID_HASH_CHECKSUM] =
+		{
+			.mh_read = fs_mgmt_file_hash_checksum,
+			.mh_write = NULL,
+		},
 #if defined(CONFIG_MCUMGR_GRP_FS_CHECKSUM_HASH_SUPPORTED_CMD)
-	[FS_MGMT_ID_SUPPORTED_HASH_CHECKSUM] = {
-		.mh_read = fs_mgmt_supported_hash_checksum,
-		.mh_write = NULL,
-	},
+	[FS_MGMT_ID_SUPPORTED_HASH_CHECKSUM] =
+		{
+			.mh_read = fs_mgmt_supported_hash_checksum,
+			.mh_write = NULL,
+		},
 #endif
 #endif
-	[FS_MGMT_ID_OPENED_FILE] = {
-		.mh_read = NULL,
-		.mh_write = fs_mgmt_close_opened_file,
-	},
+	[FS_MGMT_ID_OPENED_FILE] =
+		{
+			.mh_read = NULL,
+			.mh_write = fs_mgmt_close_opened_file,
+		},
 };
 
 #define FS_MGMT_HANDLER_CNT ARRAY_SIZE(fs_mgmt_handlers)

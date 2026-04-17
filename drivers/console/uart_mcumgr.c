@@ -19,8 +19,7 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(uart_mcumgr, CONFIG_MCUMGR_TRANSPORT_LOG_LEVEL);
 
-static const struct device *const uart_mcumgr_dev =
-	DEVICE_DT_GET(DT_CHOSEN(zephyr_uart_mcumgr));
+static const struct device *const uart_mcumgr_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_uart_mcumgr));
 
 /** Callback to execute when a valid fragment has been received. */
 static uart_mcumgr_recv_fn *uart_mcumgr_recv_cb;
@@ -202,8 +201,7 @@ static void uart_mcumgr_isr(const struct device *unused, void *user_data)
 	ARG_UNUSED(unused);
 	ARG_UNUSED(user_data);
 
-	while (uart_irq_update(uart_mcumgr_dev) &&
-	       uart_irq_is_pending(uart_mcumgr_dev)) {
+	while (uart_irq_update(uart_mcumgr_dev) && uart_irq_is_pending(uart_mcumgr_dev)) {
 
 		chunk_len = uart_mcumgr_read_chunk(buf, sizeof(buf));
 		if (chunk_len == 0) {
@@ -229,8 +227,12 @@ static int uart_mcumgr_send_raw(const void *data, int len)
 
 	u8p = data;
 	while (len--) {
-		uart_poll_out(uart_mcumgr_dev, *u8p++);
+		uint8_t val = *u8p++;
+		uart_poll_out(uart_mcumgr_dev, val);
+		printk("%02x", val);
 	}
+	printk("\n");
+	k_msleep(10);
 
 	return 0;
 }
