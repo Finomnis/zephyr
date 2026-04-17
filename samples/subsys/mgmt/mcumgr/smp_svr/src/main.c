@@ -112,11 +112,6 @@ int main(void)
 		LOG_ERR("Error initializing stats system [%d]", rc);
 	}
 
-	rc = settings_subsys_init();
-	if (rc) {
-		printk("settings subsys initialization: fail (err %d)\n", rc);
-	}
-
 	/* Register the built-in mcumgr command handlers. */
 #ifdef CONFIG_MCUMGR_GRP_FS
 	rc = fs_mount(&littlefs_mnt);
@@ -124,6 +119,11 @@ int main(void)
 		LOG_ERR("Error mounting littlefs [%d]", rc);
 	}
 #endif
+
+	rc = settings_subsys_init();
+	if (rc) {
+		printk("settings subsys initialization: fail (err %d)\n", rc);
+	}
 
 #ifdef CONFIG_MCUMGR_TRANSPORT_UDP_DTLS
 	rc = setup_udp_dtls();
