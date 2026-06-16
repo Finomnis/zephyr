@@ -56,6 +56,14 @@ from elftools.elf.sections import SymbolTableSection
 
 MemoryRegion = NewType('MemoryRegion', str)
 
+LLEXT_HEAP_SECTIONS = (
+    ".llext_heap",
+    ".llext_ext_heap",
+    ".llext_data_heap",
+    ".llext_instr_heap",
+    ".llext_metadata_heap",
+)
+
 
 class SectionKind(Enum):
     TEXT = "text"
@@ -86,7 +94,7 @@ class SectionKind(Enum):
             return cls.DATA
         elif ".bss." in name:
             return cls.BSS
-        elif ".noinit." in name:
+        elif ".noinit." in name or name in LLEXT_HEAP_SECTIONS:
             return cls.NOINIT
         elif ".literal." in name:
             return cls.LITERAL
@@ -178,7 +186,6 @@ SOURCE_CODE_INCLUDES = """
 /* Auto generated code. Do not modify.*/
 #include <zephyr/kernel.h>
 #include <zephyr/linker/linker-defs.h>
-#include <zephyr/kernel_structs.h>
 #include <kernel_internal.h>
 #include <zephyr/arch/common/init.h>
 """
@@ -191,7 +198,7 @@ extern char __{mem}_{kind}_reloc_size[];
 
 
 DATA_COPY_FUNCTION = """
-void data_copy_xip_relocation(void)
+FUNC_NO_STACK_PROTECTOR void data_copy_xip_relocation(void)
 {{
 {0}
 }}
@@ -519,8 +526,8 @@ def dump_header_file(header_file, code_generation):
     # bss/data/text regions
 
     code_string += code_generation["extern"]
-    code_string += DATA_COPY_FUNCTION.format(code_generation["copy_code"] or "return;")
-    code_string += BSS_ZEROING_FUNCTION.format(code_generation["zero_code"] or "return;")
+    code_string += DATA_COPY_FUNCTION.format(code_generation["copy_code"] or "\treturn;")
+    code_string += BSS_ZEROING_FUNCTION.format(code_generation["zero_code"] or "\treturn;")
 
     with open(header_file, "w") as header_file_desc:
         header_file_desc.write(SOURCE_CODE_INCLUDES)
