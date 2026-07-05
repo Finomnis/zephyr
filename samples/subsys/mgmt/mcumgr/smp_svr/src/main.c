@@ -28,8 +28,8 @@ LOG_MODULE_REGISTER(smp_sample);
 
 #include "common.h"
 
-#define STORAGE_PARTITION_LABEL storage_partition
-#define STORAGE_PARTITION_ID    PARTITION_ID(STORAGE_PARTITION_LABEL)
+#define STORAGE_PARTITION_LABEL	storage_partition
+#define STORAGE_PARTITION_ID	PARTITION_ID(STORAGE_PARTITION_LABEL)
 
 /* Define an example stats group; approximates seconds since boot. */
 STATS_SECT_START(smp_svr_stats)
@@ -98,15 +98,18 @@ SETTINGS_STATIC_HANDLER_DEFINE(smp_svr, "smp_svr", settings_handle_get, settings
 
 #ifdef CONFIG_MCUMGR_GRP_FS
 FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(cstorage);
-static struct fs_mount_t littlefs_mnt = {.type = FS_LITTLEFS,
-					 .fs_data = &cstorage,
-					 .storage_dev = (void *)STORAGE_PARTITION_ID,
-					 .mnt_point = "/lfs1"};
+static struct fs_mount_t littlefs_mnt = {
+	.type = FS_LITTLEFS,
+	.fs_data = &cstorage,
+	.storage_dev = (void *)STORAGE_PARTITION_ID,
+	.mnt_point = "/lfs1"
+};
 #endif
 
 int main(void)
 {
-	int rc = STATS_INIT_AND_REG(smp_svr_stats, STATS_SIZE_32, "smp_svr_stats");
+	int rc = STATS_INIT_AND_REG(smp_svr_stats, STATS_SIZE_32,
+				    "smp_svr_stats");
 
 	if (rc < 0) {
 		LOG_ERR("Error initializing stats system [%d]", rc);
