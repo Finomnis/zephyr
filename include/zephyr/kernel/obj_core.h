@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef __KERNEL_OBJ_CORE_H__
-#define __KERNEL_OBJ_CORE_H__
+#ifndef ZEPHYR_INCLUDE_KERNEL_OBJ_CORE_H_
+#define ZEPHYR_INCLUDE_KERNEL_OBJ_CORE_H_
 
 #include <stddef.h>
 #include <zephyr/sys/slist.h>
@@ -281,7 +281,7 @@ struct k_obj_type *k_obj_type_find(uint32_t type_id);
  * @retval non-zero if walk is terminated by the callback; otherwise 0
  */
 int k_obj_type_walk_locked(struct k_obj_type *type,
-			   int (*func)(struct k_obj_core *, void *),
+			   int (*func)(struct k_obj_core *obj_core, void *data),
 				  void *data);
 
 /**
@@ -303,7 +303,7 @@ int k_obj_type_walk_locked(struct k_obj_type *type,
  * @retval non-zero if walk is terminated by the callback; otherwise 0
  */
 int k_obj_type_walk_unlocked(struct k_obj_type *type,
-			     int (*func)(struct k_obj_core *, void *),
+			     int (*func)(struct k_obj_core *obj_core, void *data),
 			     void *data);
 
 /**
@@ -487,7 +487,7 @@ int k_obj_core_stats_reset(struct k_obj_core *obj_core);
 int k_obj_core_stats_disable(struct k_obj_core *obj_core);
 
 /**
- * @brief Reset the stats associated with the kernel object
+ * @brief Resume gathering the stats associated with the kernel object
  *
  * This function resumes the gathering of statistics associated with the kernel
  * object core specified by @a obj_core.
@@ -500,4 +500,4 @@ int k_obj_core_stats_disable(struct k_obj_core *obj_core);
 int k_obj_core_stats_enable(struct k_obj_core *obj_core);
 
 /** @} */
-#endif /* __KERNEL_OBJ_CORE_H__ */
+#endif /* ZEPHYR_INCLUDE_KERNEL_OBJ_CORE_H_ */

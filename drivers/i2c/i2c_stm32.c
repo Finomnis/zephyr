@@ -7,36 +7,24 @@
 
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
 #include <zephyr/drivers/clock_control.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/pinctrl.h>
+#include <zephyr/irq.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
 #include <zephyr/pm/device_runtime.h>
 #include <zephyr/sys/util.h>
-#include <zephyr/kernel.h>
+
 #include <soc.h>
 #include <stm32_ll_i2c.h>
 #include <stm32_ll_rcc.h>
 #include <errno.h>
-#include <zephyr/drivers/i2c.h>
-#include <zephyr/drivers/pinctrl.h>
-#include <zephyr/irq.h>
-
-#ifdef CONFIG_I2C_STM32_BUS_RECOVERY
-#include "i2c_bitbang.h"
-#endif /* CONFIG_I2C_STM32_BUS_RECOVERY */
-
-#define LOG_LEVEL CONFIG_I2C_LOG_LEVEL
-#include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(i2c_stm32);
 
 #include "i2c_stm32.h"
 #include "i2c-priv.h"
 
-/* This symbol takes the value 1 if one of the device instances */
-/* is configured in dts with a domain clock */
-#if STM32_DT_INST_DEV_DOMAIN_CLOCK_SUPPORT
-#define I2C_STM32_DOMAIN_CLOCK_SUPPORT 1
-#else
-#define I2C_STM32_DOMAIN_CLOCK_SUPPORT 0
-#endif
+LOG_MODULE_REGISTER(i2c_stm32, CONFIG_I2C_LOG_LEVEL);
 
 int i2c_stm32_get_config(const struct device *dev, uint32_t *config)
 {
@@ -72,70 +60,6 @@ int i2c_stm32_get_config(const struct device *dev, uint32_t *config)
 	return 0;
 }
 
-int i2c_stm32_runtime_configure(const struct device *dev, uint32_t config)
-{
-	const struct i2c_stm32_config *cfg = dev->config;
-	struct i2c_stm32_data *data = dev->data;
-	const struct device *clk = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
-	I2C_TypeDef *i2c = cfg->i2c;
-	uint32_t i2c_clock = 0U;
-	int ret;
-
-	if (IS_ENABLED(I2C_STM32_DOMAIN_CLOCK_SUPPORT) && (cfg->pclk_len > 1)) {
-		if (clock_control_get_rate(clk, (clock_control_subsys_t)&cfg->pclken[1],
-					   &i2c_clock) < 0) {
-			LOG_ERR("Failed call clock_control_get_rate(pclken[1])");
-			return -EIO;
-		}
-	} else {
-		if (clock_control_get_rate(clk, (clock_control_subsys_t)&cfg->pclken[0],
-					   &i2c_clock) < 0) {
-			LOG_ERR("Failed call clock_control_get_rate(pclken[0])");
-			return -EIO;
-		}
-	}
-
-	data->dev_config = config;
-
-	k_sem_take(&data->bus_mutex, K_FOREVER);
-
-#ifdef CONFIG_PM_DEVICE_RUNTIME
-	ret = clock_control_on(clk, (clock_control_subsys_t)&cfg->pclken[0]);
-	if (ret < 0) {
-		LOG_ERR("failure Enabling I2C clock");
-		goto out;
-	}
-#endif
-
-	LL_I2C_Disable(i2c);
-#if defined(I2C_CR1_SMBUS) || defined(I2C_CR1_SMBDEN) || defined(I2C_CR1_SMBHEN)
-	i2c_stm32_set_smbus_mode(dev, data->mode);
-#endif
-	ret = i2c_stm32_configure_timing(dev, i2c_clock);
-	if (ret < 0) {
-		goto out;
-	}
-
-	if (data->smbalert_active) {
-		LL_I2C_Enable(i2c);
-	}
-
-#ifdef CONFIG_PM_DEVICE_RUNTIME
-	ret = clock_control_off(clk, (clock_control_subsys_t)&cfg->pclken[0]);
-	if (ret < 0) {
-		LOG_ERR("failure disabling I2C clock");
-		goto out;
-	}
-#endif
-
-out:
-	k_sem_give(&data->bus_mutex);
-
-	return ret;
-}
-
-#define OPERATION(msg) (((struct i2c_msg *) msg)->flags & I2C_MSG_RW_MASK)
-
 static int i2c_stm32_transfer(const struct device *dev, struct i2c_msg *msg,
 			      uint8_t num_msgs, uint16_t target)
 {
@@ -164,7 +88,7 @@ static int i2c_stm32_transfer(const struct device *dev, struct i2c_msg *msg,
 			 * Restart condition between messages
 			 * of different directions is required
 			 */
-			if (OPERATION(current) != OPERATION(next)) {
+			if ((current->flags & I2C_MSG_RW_MASK) != (next->flags & I2C_MSG_RW_MASK)) {
 				if (!(next->flags & I2C_MSG_RESTART)) {
 					ret = -EINVAL;
 					break;
@@ -220,105 +144,21 @@ out_sem:
 	return ret;
 }
 
-#if defined(CONFIG_I2C_STM32_BUS_RECOVERY)
-static void i2c_stm32_bitbang_set_scl(void *io_context, int state)
+static int i2c_stm32_configure(const struct device *dev,
+				uint32_t dev_config_raw)
 {
-	const struct i2c_stm32_config *config = io_context;
-
-	gpio_pin_set_dt(&config->scl, state);
-}
-
-static void i2c_stm32_bitbang_set_sda(void *io_context, int state)
-{
-	const struct i2c_stm32_config *config = io_context;
-
-	gpio_pin_set_dt(&config->sda, state);
-}
-
-static int i2c_stm32_bitbang_get_sda(void *io_context)
-{
-	const struct i2c_stm32_config *config = io_context;
-
-	return gpio_pin_get_dt(&config->sda) == 0 ? 0 : 1;
-}
-
-static int i2c_stm32_recover_bus(const struct device *dev)
-{
-	const struct i2c_stm32_config *config = dev->config;
 	struct i2c_stm32_data *data = dev->data;
-	struct i2c_bitbang bitbang_ctx;
-	struct i2c_bitbang_io bitbang_io = {
-		.set_scl = i2c_stm32_bitbang_set_scl,
-		.set_sda = i2c_stm32_bitbang_set_sda,
-		.get_sda = i2c_stm32_bitbang_get_sda,
-	};
-	uint32_t bitrate_cfg = i2c_map_dt_bitrate(config->bitrate) | I2C_MODE_CONTROLLER;
-	int error = 0;
-
-	LOG_ERR("attempting to recover bus");
-
-	if ((config->scl.port == NULL) || (config->sda.port == NULL)) {
-		LOG_ERR("SCL and/or SDA GPIO definition(s) missing for I2C bus recovery");
-		return -ENOSYS;
-	}
-
-	if (!gpio_is_ready_dt(&config->scl)) {
-		LOG_ERR("SCL GPIO device not ready");
-		return -EIO;
-	}
-
-	if (!gpio_is_ready_dt(&config->sda)) {
-		LOG_ERR("SDA GPIO device not ready");
-		return -EIO;
-	}
+	int ret;
 
 	k_sem_take(&data->bus_mutex, K_FOREVER);
-
-	error = gpio_pin_configure_dt(&config->scl, GPIO_OUTPUT_HIGH);
-	if (error != 0) {
-		LOG_ERR("failed to configure SCL GPIO (err %d)", error);
-		goto restore;
-	}
-
-	error = gpio_pin_configure_dt(&config->sda, GPIO_OUTPUT_HIGH);
-	if (error != 0) {
-		LOG_ERR("failed to configure SDA GPIO (err %d)", error);
-		goto restore;
-	}
-
-	i2c_bitbang_init(&bitbang_ctx, &bitbang_io, (void *)config);
-
-	error = i2c_bitbang_configure(&bitbang_ctx, bitrate_cfg);
-	if (error != 0) {
-		LOG_ERR("failed to configure I2C bitbang (err %d)", error);
-		goto restore;
-	}
-
-	error = i2c_bitbang_recover_bus(&bitbang_ctx);
-	if (error != 0) {
-		LOG_ERR("failed to recover bus (err %d)", error);
-	}
-
-restore:
-	(void)pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
-
-	/* Re-initialize the I2C peripheral after GPIO-based bus recovery.
-	 * pinctrl_apply_state() restores the pin configuration, but the
-	 * peripheral registers remain in a faulted state. Re-running
-	 * runtime_configure() restores the peripheral to a working state.
-	 */
-	if (i2c_stm32_runtime_configure(dev, bitrate_cfg) != 0) {
-		LOG_ERR("failed to restore I2C peripheral after bus recovery");
-	}
-
+	ret = i2c_stm32_runtime_configure(dev, dev_config_raw);
 	k_sem_give(&data->bus_mutex);
 
-	return error;
+	return ret;
 }
-#endif /* CONFIG_I2C_STM32_BUS_RECOVERY */
 
 DEVICE_API(i2c, i2c_stm32_driver_api) = {
-	.configure = i2c_stm32_runtime_configure,
+	.configure = i2c_stm32_configure,
 	.transfer = i2c_stm32_transfer,
 	.get_config = i2c_stm32_get_config,
 #if defined(CONFIG_I2C_STM32_BUS_RECOVERY)
@@ -357,7 +197,7 @@ int i2c_stm32_init(const struct device *dev)
 
 	i2c_stm32_activate(dev);
 
-	if (IS_ENABLED(I2C_STM32_DOMAIN_CLOCK_SUPPORT) && (cfg->pclk_len > 1)) {
+	if (cfg->pclk_len > 1) {
 		/* Enable I2C clock source */
 		ret = clock_control_configure(clk,
 					(clock_control_subsys_t) &cfg->pclken[1],
@@ -381,7 +221,10 @@ int i2c_stm32_init(const struct device *dev)
 
 	bitrate_cfg = i2c_map_dt_bitrate(cfg->bitrate);
 
+	k_sem_take(&data->bus_mutex, K_FOREVER);
 	ret = i2c_stm32_runtime_configure(dev, I2C_MODE_CONTROLLER | bitrate_cfg);
+	k_sem_give(&data->bus_mutex);
+
 	if (ret < 0) {
 		LOG_ERR("i2c: failure initializing");
 		return ret;

@@ -76,14 +76,14 @@ void z_timer_expiration_handler(struct _timeout *t)
 	k_spinlock_key_t key = k_spin_lock(&timer_lock);
 
 	/* A same-CPU IRQ may have raced with our dispatch between
-	 * sys_clock_announce() popping us off the list and us taking
+	 * sys_clock_announce() popping us off the queue and us taking
 	 * timer.c::lock. Two cases:
-	 *  - The timer was restarted (z_add_timeout re-linked the node):
-	 *    sys_dnode_is_linked() is true, the new schedule fires later.
+	 *  - The timer was restarted (z_add_timeout re-queued the timeout):
+	 *    it is active again, and the new schedule fires later.
 	 *  - The timer was stopped (z_try_abort_timeout marked the
 	 *    in-flight slot superseded): bail without firing expiry_fn.
 	 */
-	if (sys_dnode_is_linked(&t->node) ||
+	if (!z_is_inactive_timeout(t) ||
 	    z_timeout_inflight_superseded(t)) {
 		k_spin_unlock(&timer_lock, key);
 		return;
@@ -138,24 +138,22 @@ void z_timer_expiration_handler(struct _timeout *t)
 		return;
 	}
 
-	thread = z_waitq_head(&timer->wait_q);
+	LOCK_SCHED_SPINLOCK {
+		thread = z_waitq_head_locked(&timer->wait_q);
 
-	if (thread == NULL) {
-		k_spin_unlock(&timer_lock, key);
-		return;
+		if (thread != NULL) {
+			unpend_thread_no_timeout(thread);
+			arch_thread_return_value_set(thread, 0);
+			z_sched_ready_locked(thread);
+		}
 	}
-
-	z_unpend_thread_no_timeout(thread);
-
-	arch_thread_return_value_set(thread, 0);
 
 	k_spin_unlock(&timer_lock, key);
 
-	z_ready_thread(thread);
 }
 
 
-int k_timer_cleanup(struct k_timer *timer)
+int z_timer_cleanup(struct k_timer *timer, __maybe_unused bool locked)
 {
 	/* Not callable from an ISR: this is the one timer path that can
 	 * spin waiting for an in-flight handler, and an ISR spinning here
@@ -165,6 +163,7 @@ int k_timer_cleanup(struct k_timer *timer)
 
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_timer, cleanup, timer);
 
+	int ret = 0;
 	k_spinlock_key_t key;
 
 	/* Refuse if anyone is still pending on the timer's wait queue
@@ -174,10 +173,14 @@ int k_timer_cleanup(struct k_timer *timer)
 retry:
 	key = k_spin_lock(&timer_lock);
 
-	CHECKIF(z_waitq_head(&timer->wait_q) != NULL) {
-		k_spin_unlock(&timer_lock, key);
-		SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_timer, cleanup, timer, -EAGAIN);
-		return -EAGAIN;
+	CHECKIF(locked && (z_waitq_head_locked(&timer->wait_q) != NULL)) {
+		ret = -EAGAIN;
+		goto out;
+	}
+
+	CHECKIF(!locked && (z_waitq_head(&timer->wait_q) != NULL)) {
+		ret = -EAGAIN;
+		goto out;
 	}
 
 	/* Cancel the timeout AND wait for any in-flight expiration
@@ -198,11 +201,17 @@ retry:
 		goto retry;
 	}
 
+out:
 	k_spin_unlock(&timer_lock, key);
 
-	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_timer, cleanup, timer, 0);
+	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_timer, cleanup, timer, ret);
 
-	return 0;
+	return ret;
+}
+
+int k_timer_cleanup(struct k_timer *timer)
+{
+	return z_timer_cleanup(timer, false);
 }
 
 

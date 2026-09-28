@@ -45,10 +45,9 @@ To run Twister in the local tree, follow the steps below:
    operating systems. The following invocations are equivalent:
 
    * ``west twister ...`` (recommended).
-   * ``./scripts/twister ...`` (Linux/macOS) or ``python .\scripts\twister ...``
-     (Windows): invoking the script directly. This requires the Zephyr
-     environment to be set up first (``source zephyr-env.sh`` or
-     ``zephyr-env.cmd``).
+   * ``python .\scripts\twister ...`` (Windows): invoking the script
+     directly. This requires the Zephyr environment to be set up first (``source
+     zephyr-env.sh`` or ``zephyr-env.cmd``).
 
    All forms accept the same command line options.
 
@@ -72,6 +71,7 @@ The following pages cover additional Twister topics:
    twister_statuses
    twister_blackbox
 
+.. _twister_board_configuration:
 
 Board Configuration
 *******************
@@ -157,7 +157,31 @@ arch:
   Architecture of the board
 toolchain:
   The list of supported toolchains that can build this board. This should match
-  one of the values used for :envvar:`ZEPHYR_TOOLCHAIN_VARIANT` when building on the command line
+  one of the values used for :envvar:`ZEPHYR_TOOLCHAIN_VARIANT` when building on the command line.
+  Twister filters out any test instance whose toolchain is not in this list, unless
+  ``--force-toolchain`` is given. This list says which toolchains *may* build the
+  board, it does not select one; see :ref:`twister_toolchain_selection`.
+preferred_toolchain:
+  The toolchain Twister should use for this platform when nothing else selects one.
+  This is useful for boards that are nominally buildable with several toolchains but
+  should be tested with a specific one. See :ref:`twister_toolchain_selection`.
+build_toolchains:
+  An optional list of toolchains that every test assigned to this platform should
+  be built with. Twister creates one test instance per toolchain in the list, each
+  in its own build directory, instead of picking a single toolchain for the
+  platform. For example, to build everything on ``native_sim`` with both GCC and
+  Clang:
+
+  .. code-block:: yaml
+
+      build_toolchains:
+        - host/gnu
+        - host/llvm
+
+  Because this multiplies build time, it is usually better to leave it out of the
+  board definition and enable it only for CI, using the ``build_toolchains``
+  option of the :ref:`Twister configuration file <twister_test_config>`.
+  See :ref:`twister_toolchain_selection`.
 ram:
   Available RAM on the board (specified in KB). This is used to match test scenario
   requirements.  If not specified we default to 128KB.
@@ -237,6 +261,54 @@ variants:
   entry is itself a platform definition and may override any of the keys above
   for that specific variant, while inheriting the remaining values from the
   top-level definition.
+
+.. _twister_toolchain_selection:
+
+Toolchain Selection
+*******************
+
+Several options influence which toolchain a test is built with. They fall into
+three groups: options that *select* a toolchain, options that *filter* out test
+instances whose toolchain is not usable, and options that *multiply* a test into
+several builds.
+
+Twister first determines a default toolchain for the whole run by invoking
+``cmake/verify-toolchain.cmake``, which honors the :envvar:`ZEPHYR_TOOLCHAIN_VARIANT`
+environment variable. This value is reported at the start of the run as
+``Using '<toolchain>' toolchain variant.``
+
+For every test scenario and platform pair, the toolchain is then selected using
+the first of the following that applies:
+
+#. The test scenario's ``integration_toolchains``, if set. The test is built once
+   per listed toolchain.
+#. The platform's ``build_toolchains``, if set, either in the board configuration
+   or in the :ref:`Twister configuration file <twister_test_config>`. The test is
+   built once per listed toolchain.
+#. For ``posix`` and ``unit`` platforms, ``host/llvm`` if the run default is
+   ``host/llvm``, otherwise ``host/gnu``.
+#. The platform's ``preferred_toolchain``, if set.
+#. The run default described above, or ``zephyr`` if it could not be determined.
+
+Note that :envvar:`ZEPHYR_TOOLCHAIN_VARIANT` only changes the run default, which
+is the last entry in this list. It does not override a platform's
+``preferred_toolchain`` or ``build_toolchains``, nor a scenario's
+``integration_toolchains``.
+
+Once a toolchain is selected, the resulting test instance can still be filtered
+out:
+
+* If the toolchain is not in the platform's ``toolchain`` list of supported
+  toolchains, the instance is filtered. ``--force-toolchain`` disables this check
+  and uses the selected toolchain unconditionally. The comparison also succeeds
+  on the part before the ``/``, so ``host/gnu`` matches a platform listing ``host``.
+* The scenario's ``toolchain_allow`` and ``toolchain_exclude`` options filter
+  instances by the selected toolchain.
+
+Because ``integration_toolchains`` and ``build_toolchains`` produce one test
+instance per toolchain, they multiply build time. ``build_toolchains`` is
+therefore normally left out of the board configuration and enabled only for the
+configuration file used by CI.
 
 .. _twister_tests_long_version:
 
@@ -320,7 +392,7 @@ explained in this document.
             platform_allow:
               - qemu_cortex_m3 qemu_x86
             tags:
-              bluetooth
+              - bluetooth
 
 
 A sample with tests will have the same structure with additional information
@@ -378,7 +450,9 @@ extra_args: <list of extra arguments>
     .. code-block:: yaml
 
         common:
-          tags: drivers adc
+          tags:
+           - drivers
+           - adc
         tests:
           test:
             depends_on: adc
@@ -396,7 +470,9 @@ extra_configs: <list of extra configurations>
     .. code-block:: yaml
 
         common:
-          tags: drivers adc
+          tags:
+            - drivers
+            - adc
         tests:
           test:
             depends_on: adc
@@ -410,7 +486,9 @@ extra_configs: <list of extra configurations>
     .. code-block:: yaml
 
         common:
-          tags: drivers adc
+          tags:
+            - drivers
+            - adc
         tests:
           test:
             depends_on: adc
@@ -546,6 +624,10 @@ integration_toolchains: <YML list of toolchain variants>
 
       This functionality is evaluated always and is not limited to the
       ``--integration`` option.
+
+    This option takes precedence over a platform's ``build_toolchains``. To expand
+    the toolchain scope for every test on a platform instead of per test scenario,
+    use ``build_toolchains``. See :ref:`twister_toolchain_selection`.
 
 platform_exclude: <list of platforms>
     Set of platforms that this test scenario should not run on.
@@ -801,7 +883,8 @@ required_applications: <list of required applications> (default empty)
     - ``platform``: Target platform (optional, defaults to current test's platform)
     - ``path``: Directory path where Twister should search for the application
       (optional). Can be an absolute path or a path relative to the directory
-      containing the test's YAML file. Environment variables are expanded.
+      containing the test's YAML file. Environment variables and Zephyr module
+      directory variables are expanded (see :ref:`twister_module_dir_vars`).
       If not specified, Twister searches in the same directory as the referring
       test's YAML file.
 
@@ -908,6 +991,23 @@ To load arguments from a file, add ``+`` before the file name, e.g.,
 line break instead of white spaces.
 
 Most everyday users will run with no arguments.
+
+.. _twister_module_dir_vars:
+
+Expanding paths with module directory variables
+===============================================
+
+Path options in the test scenario file (e.g. ``required_applications``,
+``harness_config: pytest_root``) are expanded before use. In addition to
+environment variables, Twister expands Zephyr module directory
+variables, which mirror the CMake variables defined for every module:
+
+* ``ZEPHYR_<MODULE>_MODULE_DIR`` - absolute path to the module's root.
+* ``ZEPHYR_<MODULE>_MODULE_NAME`` - the module's name.
+
+``<MODULE>`` is upper-cased with non-alphanumeric characters replaced by ``_``,
+exactly as CMake does (for example ``$ZEPHYR_HAL_NORDIC_MODULE_DIR`` for the
+``hal_nordic`` module). Unknown references are left unchanged.
 
 Managing tests timeouts
 =======================
@@ -1086,7 +1186,8 @@ The following is an example yaml file with a few harness_config options.
       sample:
         name: HTS221 Temperature and Humidity Monitor
       common:
-        tags: sensor
+        tags:
+          - sensor
         harness: console
         harness_config:
           type: multi_line
@@ -1097,7 +1198,8 @@ The following is an example yaml file with a few harness_config options.
           fixture: i2c_hts221
       tests:
         test:
-          tags: sensors
+          tags:
+            - sensors
           depends_on: i2c
 
 .. toctree::
@@ -1113,6 +1215,66 @@ The following is an example yaml file with a few harness_config options.
    harness/script
    harness/bsim
    harness/shell
+
+
+.. _twister_sidecars:
+
+Sidecars
+********
+
+Some tests need a host-side resource to exist for the duration of a run: a
+daemon the emulated guest talks to, a shared memory region the host reads back
+afterwards, or a network interface the guest attaches to. A *sidecar* models
+this. It is selected with the ``sidecar:`` entry in a test scenario's
+:file:`tests.yaml` and is orthogonal to the harness: the
+harness interprets the guest's output while the sidecar provisions the host side
+around the run. Any harness (``console`` for a sample, ``ztest`` for a test,
+...) can therefore be paired with any sidecar.
+
+.. code-block:: yaml
+
+   tests:
+     some.test:
+       harness: ztest
+       sidecar: <name>
+
+A sidecar has a small lifecycle, driven by Twister for each test instance:
+
+#. **configure** -- the sidecar reads what it needs from the instance and its
+   ``sidecar_config`` block before anything is provisioned.
+#. **host check** -- at test-plan time the sidecar reports whether the host
+   provides what it needs (for example, that a required daemon binary is
+   installed). When it does not, the test is *built only* and not executed,
+   exactly like a platform whose simulator is not installed.
+#. **setup** -- called just before the handler runs the test image; it brings
+   the host resource up (starts a daemon, creates an interface, ...). If the
+   host side still turns out to be unavailable -- for example bringing the
+   resource up needs privileges that are not present -- setup reports this and
+   Twister *skips* execution instead of failing the test.
+#. **teardown** -- called after the handler returns, in a ``finally`` block, so
+   it always runs even if the test failed or timed out. It releases the resource
+   and may also collect data the guest left behind (for example reading a shared
+   memory region back into the build directory).
+
+Because provisioning is decoupled from output processing, Twister can also
+attach a sidecar to an instance itself, without the test opting in -- for
+example to route coverage data off a guest that has no other host transport.
+
+Each sidecar defines its own configuration keys under a block of
+``sidecar_config`` named after the sidecar. Namespacing by sidecar name keeps
+each sidecar's keys separate, so only the block matching the scenario's
+``sidecar:`` value is consumed. For example, the ``virtiofs`` sidecar shares a
+host directory seeded from a template with:
+
+.. code-block:: yaml
+
+   tests:
+     some.test:
+       harness: console
+       sidecar: virtiofs
+       sidecar_config:
+         virtiofs:
+           shared: shared
 
 
 Selecting platform scope
@@ -1296,13 +1458,13 @@ devices, for example:
       .. code-block:: yaml
 
          - connected: true
-           id: OSHW000032254e4500128002ab98002784d1000097969900
+           id: "OSHW000032254e4500128002ab98002784d1000097969900"
            platform: unknown
            product: DAPLink CMSIS-DAP
            runner: pyocd
            serial: /dev/cu.usbmodem146114202
          - connected: true
-           id: 000683759358
+           id: "000683759358"
            platform: unknown
            product: J-Link
            runner: unknown
@@ -1313,13 +1475,13 @@ devices, for example:
       .. code-block:: yaml
 
          - connected: true
-           id: OSHW000032254e4500128002ab98002784d1000097969900
+           id: "OSHW000032254e4500128002ab98002784d1000097969900"
            platform: unknown
            product: unknown
            runner: unknown
            serial: COM1
          - connected: true
-           id: 000683759358
+           id: "000683759358"
            platform: unknown
            product: unknown
            runner: unknown
@@ -1338,14 +1500,14 @@ In this example we are using a reel_board and an nrf52840dk/nrf52840:
       .. code-block:: yaml
 
          - connected: true
-           id: OSHW000032254e4500128002ab98002784d1000097969900
+           id: "OSHW000032254e4500128002ab98002784d1000097969900"
            platform: reel_board
            product: DAPLink CMSIS-DAP
            runner: pyocd
            serial: /dev/cu.usbmodem146114202
            baud: 9600
          - connected: true
-           id: 000683759358
+           id: "000683759358"
            platform: nrf52840dk/nrf52840
            product: J-Link
            runner: nrfjprog
@@ -1357,14 +1519,14 @@ In this example we are using a reel_board and an nrf52840dk/nrf52840:
       .. code-block:: yaml
 
          - connected: true
-           id: OSHW000032254e4500128002ab98002784d1000097969900
+           id: "OSHW000032254e4500128002ab98002784d1000097969900"
            platform: reel_board
            product: DAPLink CMSIS-DAP
            runner: pyocd
            serial: COM1
            baud: 9600
          - connected: true
-           id: 000683759358
+           id: "000683759358"
            platform: nrf52840dk/nrf52840
            product: J-Link
            runner: nrfjprog
@@ -1496,7 +1658,7 @@ Fixtures are defined in the hardware map file as a list:
       - connected: true
         fixtures:
           - gpio_loopback
-        id: 0240000026334e450015400f5e0e000b4eb1000097969900
+        id: "0240000026334e450015400f5e0e000b4eb1000097969900"
         platform: frdm_k64f
         product: DAPLink CMSIS-DAP
         runner: pyocd
@@ -1505,6 +1667,20 @@ Fixtures are defined in the hardware map file as a list:
 When running ``twister`` with ``--device-testing``, the configured fixture
 in the hardware map file will be matched to test scenarios requesting the same fixtures
 and these tests will be executed on the boards that provide this fixture.
+
+To reserve a board for fixture-dependent tests, set ``run_with_fixture_only`` to
+``true``. Twister will select that board only for test scenarios that request
+matching fixtures; it will not select the board for scenarios without fixture
+requirements.
+
+.. code-block:: yaml
+
+      - connected: true
+        fixtures:
+          - gpio_loopback
+        run_with_fixture_only: true
+        id: 0240000026334e450015400f5e0e000b4eb1000097969900
+        platform: frdm_k64f
 
 .. figure:: figures/fixtures.svg
    :figclass: align-center
@@ -1530,7 +1706,7 @@ example:
     - connected: false
       fixtures:
         - gpio_loopback
-      id: 000683290670
+      id: "000683290670"
       notes: An nrf5340dk/nrf5340 is detected as an nrf52840dk/nrf52840 with no serial
         port, and three serial ports with an unknown platform.  The board id of the serial
         ports is not the same as the board id of the development kit.  If you regenerate
@@ -1553,9 +1729,9 @@ using an external J-Link probe.  The ``probe_id`` keyword overrides the
 .. code-block:: yaml
 
     - connected: false
-      id: 0229000005d9ebc600000000000000000000000097969905
+      id: "0229000005d9ebc600000000000000000000000097969905"
       platform: mimxrt1060_evk
-      probe_id: 000609301751
+      probe_id: "000609301751"
       product: DAPLink CMSIS-DAP
       runner: jlink
       serial: null
@@ -1571,7 +1747,7 @@ Using Single Board For Multiple Variants
 .. code-block:: yaml
 
     - connected: true
-      id: '001234567890'
+      id: "001234567890"
       platform:
       - nrf5340dk/nrf5340/cpuapp
       - nrf5340dk/nrf5340/cpuapp/ns
@@ -1593,10 +1769,10 @@ For example:
 .. code-block:: yaml
 
     - connected: true
-      id: 001234567890
+      id: "001234567890"
       serial: /dev/ttyACM0
     - connected: true
-      id: 001234567890
+      id: "001234567890"
       platform:
       - nrf54l15dk/nrf54l15/cpuapp
       product: J-Link
@@ -1639,11 +1815,11 @@ Each entry needs a matching platform and a serial connection:
 .. code-block:: yaml
 
     - connected: true
-      id: 01
+      id: "01"
       platform: nrf52840dk/nrf52840
       serial: /dev/ttyACM0
     - connected: true
-      id: 02
+      id: "02"
       platform: nrf52840dk/nrf52840
       serial: /dev/ttyACM1
 
@@ -1797,6 +1973,50 @@ contain:
     Data fields captured by the ``record`` option of the
     :ref:`console harness <twister_console_harness>`, when configured.
 
+.. _twister_console_monitor:
+
+Live Run Monitoring
+*******************
+
+For long runs it can be hard to tell from the scrolling console output what
+twister is actually doing: what is queued, what each job is building or
+running right now, and which tests have already failed and why. The
+``--console-monitor`` option replaces the normal output with a live
+full-screen dashboard in the terminal for the duration of the run:
+
+.. code-block:: console
+
+   $ west twister -T tests/kernel --console-monitor
+
+The dashboard shows overall progress with pass/fail/error/filtered
+breakdowns and an estimated time to completion, the set of test instances
+currently *in flight* with the pipeline stage each one is in (``cmake``,
+``build``, ``run``, ...), and a scrollable table of every test instance in
+the plan, including statically filtered ones. Normal log output goes to
+:file:`twister.log` in the meantime.
+
+Navigation: :kbd:`Tab` cycles the table filter
+(all/active/failures/passed/queued/filtered), :kbd:`f` jumps straight to
+the failures view, and :kbd:`/` starts an incremental text search over
+instance names and failure reasons (:kbd:`Esc` clears it). Move the
+selection with the arrow keys or :kbd:`j`/:kbd:`k` and press :kbd:`Enter`
+to open the detail view for an instance: its pipeline stage timeline, the
+list of failing test cases with their reasons, and the tail of its log
+files (:kbd:`l` switches between the available logs, :kbd:`j`/:kbd:`k` or
+the arrow keys scroll, :kbd:`g`/:kbd:`G` jump to the top/end, and the view
+follows new output while pinned to the end) -- particularly useful for
+inspecting failures while the rest of the run continues.
+
+When the run finishes the dashboard stays up so failures can be inspected;
+pressing :kbd:`q` leaves it, after which reports are written and twister
+exits as usual. Pressing :kbd:`q` while the run is still going leaves the
+dashboard early and resumes the normal console output. The option requires
+an interactive terminal and is ignored otherwise (e.g. in CI).
+
+The monitor observes the run without influencing it: monitoring events are
+delivered on a best-effort basis and are dropped rather than ever delaying
+the build/run pipeline.
+
 .. _twister_test_config:
 
 Twister Configuration File
@@ -1858,6 +2078,14 @@ The following options control platform filtering in twister:
 - ``default_platforms``: A list of additional default platforms to add. This list
   can either be used to replace the existing default platforms or can extend it
   depending on the value of ``override_default_platforms``.
+- ``build_toolchains``: A mapping of platform names to the list of toolchains
+  every test assigned to that platform should be built with. Twister creates one
+  test instance per toolchain, each in its own build directory. This sets, or
+  overrides, the ``build_toolchains`` option of the board definition; an empty
+  list disables multi-toolchain builds for a platform that requests them. Since
+  this multiplies build time, it is typically enabled only in the configuration
+  file used by CI (``tests/test_config_ci.yaml``) so that local runs keep
+  building each test once. See :ref:`twister_toolchain_selection`.
 
 And example platforms configuration:
 
@@ -1868,6 +2096,10 @@ And example platforms configuration:
 	  increased_platform_scope: false
 	  default_platforms:
 	    - qemu_x86
+	  build_toolchains:
+	    native_sim:
+	      - host/gnu
+	      - host/llvm
 
 
 Test Level Configuration

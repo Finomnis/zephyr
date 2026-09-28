@@ -83,7 +83,7 @@ sync_state_get_or_new(const struct bt_bap_scan_delegator_recv_state *recv_state)
 			free_state = &scan_delegator_sync_states[i];
 		}
 
-		if (scan_delegator_sync_states[i].recv_state == recv_state) {
+		if (scan_delegator_sync_states[i].src_id == recv_state->src_id) {
 			scan_delegator_sync_states[i].active = true;
 
 			return &scan_delegator_sync_states[i];
@@ -150,6 +150,7 @@ struct scan_delegator_sync_state *scan_delegator_sync_state_new(void)
 	for (size_t i = 0U; i < ARRAY_SIZE(scan_delegator_sync_states); i++) {
 		if (!scan_delegator_sync_states[i].active) {
 			scan_delegator_sync_states[i].active = true;
+			scan_delegator_sync_states[i].broadcast_id = BT_BAP_INVALID_BROADCAST_ID;
 
 			return &scan_delegator_sync_states[i];
 		}
@@ -245,12 +246,23 @@ static int pa_sync_no_past(struct scan_delegator_sync_state *state, uint16_t pa_
 {
 	const struct bt_bap_scan_delegator_recv_state *recv_state;
 	struct bt_le_per_adv_sync_param param = { 0 };
+	struct bt_le_local_features feature;
 	int err;
+
+	err = bt_le_get_local_features(&feature);
+	if (err != 0) {
+		bt_shell_info("Failed to get local features: %d", err);
+		return err;
+	}
 
 	recv_state = state->recv_state;
 
 	bt_addr_le_copy(&param.addr, &recv_state->addr);
-	param.options = BT_LE_PER_ADV_SYNC_OPT_FILTER_DUPLICATE;
+	if (BT_FEAT_LE_PER_ADV_ADI_SUPP(feature.features)) {
+		param.options = BT_LE_PER_ADV_SYNC_OPT_FILTER_DUPLICATE;
+	} else {
+		param.options = BT_LE_PER_ADV_SYNC_OPT_NONE;
+	}
 	param.sid = recv_state->adv_sid;
 	param.skip = PA_SYNC_SKIP;
 	param.timeout = interval_to_sync_timeout(pa_interval);
@@ -276,6 +288,15 @@ static int pa_sync_term(struct scan_delegator_sync_state *state)
 	int err;
 
 	(void)k_work_cancel_delayable(&state->pa_timer);
+
+	/* If we are waiting for PAST, we just clear the data, as we won't have a PA sync object to
+	 * remove
+	 */
+	if (state->recv_state->pa_sync_state == BT_BAP_PA_STATE_INFO_REQ) {
+		state->pa_syncing = false;
+
+		return 0;
+	}
 
 	if (state->pa_sync == NULL) {
 		bt_shell_warn("PA state %p not synced", state);
@@ -463,6 +484,14 @@ static void pa_synced_cb(struct bt_le_per_adv_sync *sync,
 				      src_id);
 			return;
 		}
+
+		if (state->pa_sync != NULL) {
+			bt_shell_error(
+				"Unexpected existing PA sync for state %p from source_id 0x%02X",
+				state, src_id);
+		} else {
+			state->pa_sync = sync;
+		}
 	}
 
 	bt_conn_drop(&state->conn);
@@ -499,6 +528,10 @@ static struct bt_le_per_adv_sync_cb pa_sync_cb = {
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
 	ARRAY_FOR_EACH_PTR(scan_delegator_sync_states, sync_state) {
 		if (sync_state->conn == conn) {
 			bt_conn_drop(&sync_state->conn);
@@ -520,6 +553,11 @@ static int cmd_bap_scan_delegator_init(const struct shell *sh, size_t argc,
 
 	if (!registered) {
 		int err;
+
+		ARRAY_FOR_EACH_PTR(scan_delegator_sync_states, state) {
+			state->broadcast_id = BT_BAP_INVALID_BROADCAST_ID;
+			/* Remaining fields are 0/NULL initialized */
+		}
 
 		err = bt_bap_scan_delegator_register(&scan_delegator_cb);
 		if (err != 0) {
@@ -626,6 +664,10 @@ static int cmd_bap_scan_delegator_sync_pa(const struct shell *sh, size_t argc,
 		shell_info(sh, "Syncing without PAST");
 		err = pa_sync_no_past(state, state->pa_interval,
 				      &per_adv_syncs[selected_per_adv_sync]);
+
+		if (err == 0) {
+			state->pa_sync = per_adv_syncs[selected_per_adv_sync];
+		}
 	}
 
 	if (err != 0) {
@@ -689,14 +731,14 @@ static int cmd_bap_scan_delegator_add_src(const struct shell *sh, size_t argc, c
 	unsigned long adv_sid;
 	int err;
 
-	err = bt_addr_le_from_str(argv[1], argv[2], &param.addr);
+	err = bt_addr_le_from_str(argv[1], &param.addr);
 	if (err != 0) {
 		shell_error(sh, "Invalid peer address (err %d)", err);
 
 		return -ENOEXEC;
 	}
 
-	adv_sid = shell_strtoul(argv[3], 0, &err);
+	adv_sid = shell_strtoul(argv[2], 0, &err);
 	if (err != 0) {
 		shell_error(sh, "Could not parse adv_sid: %d", err);
 
@@ -711,9 +753,9 @@ static int cmd_bap_scan_delegator_add_src(const struct shell *sh, size_t argc, c
 
 	param.sid = adv_sid;
 
-	broadcast_id = shell_strtoul(argv[4], 16, &err);
+	broadcast_id = shell_strtoul(argv[3], 16, &err);
 	if (err != 0) {
-		shell_error(sh, "Failed to parse broadcast_id from %s", argv[1]);
+		shell_error(sh, "Failed to parse broadcast_id from %s", argv[3]);
 
 		return -EINVAL;
 	}
@@ -724,9 +766,9 @@ static int cmd_bap_scan_delegator_add_src(const struct shell *sh, size_t argc, c
 		return -EINVAL;
 	}
 
-	enc_state = shell_strtoul(argv[5], 16, &err);
+	enc_state = shell_strtoul(argv[4], 16, &err);
 	if (err != 0) {
-		shell_error(sh, "Failed to parse enc_state from %s", argv[2]);
+		shell_error(sh, "Failed to parse enc_state from %s", argv[4]);
 
 		return -EINVAL;
 	}
@@ -739,12 +781,12 @@ static int cmd_bap_scan_delegator_add_src(const struct shell *sh, size_t argc, c
 
 	/* TODO: Support multiple subgroups */
 	subgroup_param = &param.subgroups[0];
-	if (argc > 6) {
+	if (argc > 5) {
 		unsigned long bis_sync;
 
-		bis_sync = shell_strtoul(argv[6], 16, &err);
+		bis_sync = shell_strtoul(argv[5], 16, &err);
 		if (err != 0) {
-			shell_error(sh, "Failed to parse bis_sync from %s", argv[3]);
+			shell_error(sh, "Failed to parse bis_sync from %s", argv[5]);
 
 			return -EINVAL;
 		}
@@ -754,13 +796,15 @@ static int cmd_bap_scan_delegator_add_src(const struct shell *sh, size_t argc, c
 
 			return -EINVAL;
 		}
+
+		subgroup_param->bis_sync = bis_sync;
 	} else {
 		subgroup_param->bis_sync = 0U;
 	}
 
-	if (argc > 7) {
+	if (argc > 6) {
 		subgroup_param->metadata_len =
-			hex2bin(argv[4], strlen(argv[7]), subgroup_param->metadata,
+			hex2bin(argv[6], strlen(argv[6]), subgroup_param->metadata,
 				sizeof(subgroup_param->metadata));
 
 		if (subgroup_param->metadata_len == 0U) {
@@ -859,6 +903,8 @@ static int cmd_bap_scan_delegator_add_src_by_pa_sync(const struct shell *sh, siz
 
 			return -EINVAL;
 		}
+
+		subgroup_param->bis_sync = bis_sync;
 	} else {
 		subgroup_param->bis_sync = 0U;
 	}
@@ -888,9 +934,19 @@ static int cmd_bap_scan_delegator_add_src_by_pa_sync(const struct shell *sh, siz
 	param.broadcast_id = broadcast_id;
 	param.num_subgroups = 1U;
 
+	/* Shall be assigned before bt_bap_scan_delegator_add_src so that it is available in the
+	 * recv_state_updated_cb callback
+	 */
+	state->pa_sync = pa_sync;
+	state->broadcast_id = broadcast_id;
+
 	err = bt_bap_scan_delegator_add_src(&param);
 	if (err < 0) {
 		shell_error(sh, "Failed to add source: %d", err);
+
+		state->pa_sync = NULL;
+		state->broadcast_id = BT_BAP_INVALID_BROADCAST_ID;
+		state->active = false;
 
 		return -ENOEXEC;
 	}
@@ -968,6 +1024,8 @@ static int cmd_bap_scan_delegator_mod_src(const struct shell *sh, size_t argc,
 
 			return -EINVAL;
 		}
+
+		subgroup_param->bis_sync = bis_sync;
 	} else {
 		subgroup_param->bis_sync = 0U;
 	}
@@ -1038,13 +1096,11 @@ static int cmd_bap_scan_delegator_bis_synced(const struct shell *sh, size_t argc
 					 char **argv)
 {
 	uint32_t bis_syncs[CONFIG_BT_BAP_BASS_MAX_SUBGROUPS];
-
-	ARG_UNUSED(argc);
-
-	unsigned long pa_sync_state;
 	unsigned long bis_synced;
 	unsigned long src_id;
 	int result = 0;
+
+	ARG_UNUSED(argc);
 
 	src_id = shell_strtoul(argv[1], 0, &result);
 	if (result != 0) {
@@ -1059,20 +1115,7 @@ static int cmd_bap_scan_delegator_bis_synced(const struct shell *sh, size_t argc
 		return -ENOEXEC;
 	}
 
-	pa_sync_state = shell_strtoul(argv[2], 0, &result);
-	if (result != 0) {
-		shell_error(sh, "Could not parse pa_sync_state: %d", result);
-
-		return -ENOEXEC;
-	}
-
-	if (pa_sync_state > BT_BAP_PA_STATE_NO_PAST) {
-		shell_error(sh, "Invalid pa_sync_state %s", bt_bap_pa_state_str(pa_sync_state));
-
-		return -ENOEXEC;
-	}
-
-	bis_synced = shell_strtoul(argv[3], 0, &result);
+	bis_synced = shell_strtoul(argv[2], 0, &result);
 	if (result != 0) {
 		shell_error(sh, "Could not parse bis_synced: %d", result);
 
@@ -1160,7 +1203,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bap_scan_delegator_cmds,
 		      "Terminate PA sync <src_id>",
 		      cmd_bap_scan_delegator_term_pa, 2, 0),
 	SHELL_CMD_ARG(add_src, NULL,
-		      "Add a PA as source <addr> <sid> <broadcast_id> <enc_state> "
+		      "Add a PA as source <address: P:XX:XX:XX:XX:XX:XX or "
+		      "R:XX:XX:XX:XX:XX:XX> <sid> <broadcast_id> <enc_state> "
 		      "[bis_sync [metadata]]",
 		      cmd_bap_scan_delegator_add_src, 5, 2),
 	SHELL_CMD_ARG(add_src_by_pa_sync, NULL,
@@ -1173,7 +1217,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bap_scan_delegator_cmds,
 		      "Remove source <src_id>",
 		      cmd_bap_scan_delegator_rem_src, 2, 0),
 	SHELL_CMD_ARG(synced, NULL,
-		      "Set server scan state <src_id> <bis_syncs>",
+		      "Set server BIS sync state <src_id> <bis_syncs>",
 		      cmd_bap_scan_delegator_bis_synced, 3, 0),
 	SHELL_CMD_ARG(print_recv_states, NULL, "Print all data from receive states",
 		      cmd_bap_scan_delegator_print_recv_states, 1, 0),

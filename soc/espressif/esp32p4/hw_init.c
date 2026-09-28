@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "hw_init.h"
+#include <hw_init.h>
 #include <stdint.h>
 #include <esp_cpu.h>
 #include <soc/rtc.h>
@@ -55,7 +55,6 @@ int hardware_init(void)
 	soc_hw_init();
 	ana_reset_config();
 	super_wdt_auto_feed();
-	esp_clk_tree_initialize();
 	bootloader_clock_configure();
 
 	/* The ROM bootloader leaves PSRAM module clocks gated. Enable them

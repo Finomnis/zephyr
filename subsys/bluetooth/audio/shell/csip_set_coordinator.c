@@ -56,6 +56,10 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 {
 	uint8_t conn_index;
 
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
 	if (err != 0) {
 		bt_shell_error("Failed to connect to %s (%u)", bt_conn_dst_str(conn), err);
 		return;
@@ -73,9 +77,15 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
-	uint8_t conn_index = bt_conn_index(conn);
+	uint8_t conn_index;
 
 	ARG_UNUSED(reason);
+
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
+	conn_index = bt_conn_index(conn);
 
 	bt_conn_drop(&conns[conn_index]);
 }
@@ -299,7 +309,7 @@ static int cmd_csip_set_coordinator_discover(const struct shell *sh,
 			return -ENOEXEC;
 		}
 
-		if (member_index > ARRAY_SIZE(conns)) {
+		if (member_index >= ARRAY_SIZE(conns)) {
 			shell_error(sh, "Invalid member_index: %lu",
 				    member_index);
 
@@ -484,7 +494,7 @@ static int cmd_csip_set_coordinator_lock(const struct shell *sh, size_t argc,
 			return -ENOEXEC;
 		}
 
-		if (member_index > ARRAY_SIZE(set_members)) {
+		if (member_index >= ARRAY_SIZE(set_members)) {
 			shell_error(sh, "Invalid member_index: %lu",
 				    member_index);
 
@@ -523,7 +533,7 @@ static int cmd_csip_set_coordinator_release(const struct shell *sh, size_t argc,
 			return -ENOEXEC;
 		}
 
-		if (member_index > ARRAY_SIZE(set_members)) {
+		if (member_index >= ARRAY_SIZE(set_members)) {
 			shell_error(sh, "Invalid member_index: %lu",
 				    member_index);
 

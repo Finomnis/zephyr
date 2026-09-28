@@ -22,7 +22,7 @@ tests:
       - CONFIG_MCUMGR_GRP_OS_INFO_CUSTOM_HOOKS=n
       - CONFIG_MCUMGR_MGMT_NOTIFICATION_HOOKS=n
   mgmt.mcumgr.os.info.bt:
-    depends_on: ble
+    depends_on: bluetooth
     extra_configs:
       - CONFIG_BT=y
       - CONFIG_BT_DEVICE_NAME="a_bt_name"
@@ -39,6 +39,8 @@ tests:
       - qemu_riscv32/qemu_virt_riscv32/smp
       - qemu_riscv32/qemu_virt_riscv32/aia-imsic
       - qemu_riscv32/qemu_virt_riscv32/aia-imsic/smp
+      - qemu_riscv32/qemu_virt_riscv32/aia-direct
+      - qemu_riscv32/qemu_virt_riscv32/aia-direct/smp
       - qemu_cortex_m3
       - mps2/an385
     extra_configs:

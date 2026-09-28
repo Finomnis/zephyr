@@ -96,6 +96,14 @@ struct usb_device {
 	struct usb_host_ep ep_out[16];
 	/** Pointers to device IN endpoints */
 	struct usb_host_ep ep_in[16];
+	/** Pointer to the hub to which this device is connected */
+	struct usb_device *hub;
+	/** Device's hub Think Time */
+	uint16_t tt;
+	/** Device's hub port */
+	uint8_t hub_port;
+	/** Device's level (root device = 1) */
+	uint8_t level;
 };
 
 /**
@@ -121,7 +129,7 @@ struct uhc_transfer {
 	/** dlist node */
 	sys_dnode_t node;
 	/** Control transfer setup packet */
-	uint8_t setup_pkt[8];
+	__aligned(USB_BUF_ALIGN) uint8_t setup_pkt[USB_BUF_ROUND_UP(8)];
 	/** Transfer data buffer */
 	struct net_buf *buf;
 	/** Endpoint to which request is associated */
@@ -293,7 +301,7 @@ static inline bool uhc_is_enabled(const struct device *dev)
 /**
  * @cond INTERNAL_HIDDEN
  */
-struct uhc_api {
+__subsystem struct uhc_driver_api {
 	int (*lock)(const struct device *dev);
 	int (*unlock)(const struct device *dev);
 
@@ -329,7 +337,7 @@ struct uhc_api {
  */
 static inline int uhc_bus_reset(const struct device *dev)
 {
-	const struct uhc_api *api = dev->api;
+	const struct uhc_driver_api *api = DEVICE_API_GET(uhc, dev);
 	int ret;
 
 	api->lock(dev);
@@ -351,7 +359,7 @@ static inline int uhc_bus_reset(const struct device *dev)
  */
 static inline int uhc_sof_enable(const struct device *dev)
 {
-	const struct uhc_api *api = dev->api;
+	const struct uhc_driver_api *api = DEVICE_API_GET(uhc, dev);
 	int ret;
 
 	api->lock(dev);
@@ -374,7 +382,7 @@ static inline int uhc_sof_enable(const struct device *dev)
  */
 static inline int uhc_bus_suspend(const struct device *dev)
 {
-	const struct uhc_api *api = dev->api;
+	const struct uhc_driver_api *api = DEVICE_API_GET(uhc, dev);
 	int ret;
 
 	api->lock(dev);
@@ -397,7 +405,7 @@ static inline int uhc_bus_suspend(const struct device *dev)
  */
 static inline int uhc_bus_resume(const struct device *dev)
 {
-	const struct uhc_api *api = dev->api;
+	const struct uhc_driver_api *api = DEVICE_API_GET(uhc, dev);
 	int ret;
 
 	api->lock(dev);

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright The Zephyr Project Contributors
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ from datetime import UTC, datetime
 
 from spdx_python_model import v3_0_1 as spdx
 
+from zspdx.licenses import get_license_ids
 from zspdx.model import (
     NOASSERTION,
     ComponentPurpose,
@@ -22,11 +24,12 @@ from zspdx.model import (
 from zspdx.serializers.helpers import (
     CPE23TYPE_REGEX,
     PURL_REGEX,
+    format_blob_comment,
     generate_download_url,
-    get_standard_licenses,
     normalize_spdx_name,
 )
 from zspdx.spdxids import get_unique_file_id
+from zspdx.version import SPDX_VERSION_3_0, SPDX_VERSION_3_1
 
 _logger = logging.getLogger(__name__)
 
@@ -50,9 +53,24 @@ class SPDX3Serializer:
     # does not provide an absolute URI of its own.
     _DEFAULT_BUILD_TYPE = "urn:spdx.dev:zephyr-cmake"
 
-    def __init__(self, sbom_graph: SBOMGraph, spdx_version=None):
+    def __init__(self, sbom_graph: SBOMGraph, spdx_version=SPDX_VERSION_3_0):
         self.sbom_data = sbom_graph
-        self.spdx_version = spdx_version  # Not used for SPDX 3.0, but kept for API consistency
+        self.spdx_version = spdx_version
+
+        # Select the SPDX 3.x Python bindings matching the requested spec version.
+        # v3.1 is a strict superset of v3.0.1 with identical public class names, so
+        # only the binding module (which drives the emitted JSON-LD @context) and the
+        # specVersion string differ; the rest of the serializer stays version-agnostic.
+        if spdx_version == SPDX_VERSION_3_0:
+            self.spec_version = "3.0.1"
+            bindings = "v3_0_1"
+        elif spdx_version == SPDX_VERSION_3_1:
+            self.spec_version = "3.1.0"
+            bindings = "v3_1"
+        else:
+            raise ValueError(f"Unsupported SPDX version: {spdx_version}")
+        global spdx
+        spdx = getattr(importlib.import_module("spdx_python_model"), bindings)
 
         # Track SPDX 3.0 elements
         self.elements = []  # All SPDX3 elements (packages, files, relationships, etc.)
@@ -68,6 +86,8 @@ class SPDX3Serializer:
         # Shared objects
         self.tool = None  # Tool element for createdUsing
         self.creator_agent = None  # SoftwareAgent for createdBy
+        self.author_agent = None  # Organization for createdBy (the SBOM author)
+        self.organizations = {}  # organization name -> shared Organization element
         self.creation_info = None
         self.documents = {}  # doc_name -> SpdxDocument
 
@@ -79,6 +99,11 @@ class SPDX3Serializer:
 
         # Track file IDs for uniqueness
         self.filename_counts = {}
+
+        # Lazily built map: element id -> name of the document that defines it.
+        # Used to reference cross-document elements via ExternalMap instead of
+        # re-serializing them in every document that mentions them.
+        self._element_home = None
 
         # Namespace prefixes for shortened IDs
         self.namespace_prefixes = {}
@@ -148,7 +173,15 @@ class SPDX3Serializer:
             # Create the tool (for createdUsing)
             self.tool = spdx.Tool()
             self.tool._id = self._shorten_id(f"{namespace}/tools/west-spdx")
-            self.tool.name = "West SPDX Tool"
+            self.tool.name = self.sbom_data.metadata.get("tool_name") or "West SPDX Tool"
+            # SPDX 3.0 has no Tool version field; record it as a packageUrl external
+            # identifier, mirroring how the Build profile tools carry their version.
+            tool_version = self.sbom_data.metadata.get("tool_version")
+            if tool_version:
+                ext_id = spdx.ExternalIdentifier()
+                ext_id.externalIdentifierType = spdx.ExternalIdentifierType.packageUrl
+                ext_id.identifier = f"pkg:generic/zephyr-spdx-builder@{tool_version}"
+                self.tool.externalIdentifier.append(ext_id)
             self.elements.append(self.tool)
 
         if self.creation_info is None:
@@ -159,16 +192,45 @@ class SPDX3Serializer:
             self.creation_info.createdBy.append(self.creator_agent._id)
             # createdUsing references the Tool that created this SPDX document (optional)
             self.creation_info.createdUsing.append(self.tool._id)
-            self.creation_info.specVersion = "3.0.1"
+            self.creation_info.specVersion = self.spec_version
             self.elements.append(self.creation_info)
 
             # Now set the tool's and agent's creationInfo
             self.tool.creationInfo = self.creation_info._id
             self.creator_agent.creationInfo = self.creation_info._id
 
+            # Credit the organization author alongside the automated agent, so the
+            # SBOM declares a real author. Reuses the shared Organization element,
+            # which package suppliers also reference.
+            organization = self.sbom_data.metadata.get("creator_organization")
+            self.author_agent = self._get_organization(organization)
+            if self.author_agent:
+                self.creation_info.createdBy.append(self.author_agent._id)
+
         # Build profile elements; no-ops when no build information was collected.
         self._create_build_tools()
         self._create_build_object()
+
+    def _get_organization(self, name: str):
+        """Return a shared Organization element for ``name``, creating it once.
+
+        Organizations are deduplicated by name so a supplier that is also the SBOM
+        author (or supplies many packages) is emitted as a single Agent that every
+        reference points at. Returns ``None`` when ``name`` is empty.
+        """
+        if not name:
+            return None
+        agent = self.organizations.get(name)
+        if agent is None:
+            namespace = self.sbom_data.namespace_prefix.rstrip("/")
+            slug = normalize_spdx_name(name).lower().replace(" ", "-")
+            agent = spdx.Organization()
+            agent._id = self._shorten_id(f"{namespace}/agents/{slug}")
+            agent.name = name
+            agent.creationInfo = self.creation_info._id
+            self.elements.append(agent)
+            self.organizations[name] = agent
+        return agent
 
     # ---- SPDX 3.0 Build profile -------------------------------------------------
 
@@ -522,12 +584,18 @@ class SPDX3Serializer:
         package.name = component.name
         package.creationInfo = self.creation_info._id
         package.software_primaryPurpose = self._purpose_to_spdx3(component.purpose)
+        if component.comment:
+            package.comment = component.comment
 
         # Version
         if component.version:
             package.software_packageVersion = component.version
         elif component.revision:
             package.software_packageVersion = component.revision
+
+        supplier_agent = self._get_organization(component.supplier)
+        if supplier_agent:
+            package.suppliedBy = supplier_agent._id
 
         # Download location
         if component.url:
@@ -582,6 +650,13 @@ class SPDX3Serializer:
         # Copyright
         file_element.software_copyrightText = file_obj.copyright_text or NOASSERTION
 
+        # blob provenance metadata, for files that modules declare as blobs
+        blob = file_obj.metadata.get("blob")
+        if blob:
+            file_element.comment = format_blob_comment(blob)
+            if blob.get("description"):
+                file_element.description = blob["description"]
+
         # Hashes - SPDX 3.0 uses verifiedUsing with Hash (which is a type of IntegrityMethod)
         for hash_type, hash_value in file_obj.hashes.items():
             if hash_value:
@@ -598,6 +673,9 @@ class SPDX3Serializer:
                 hash_obj.hashValue = hash_value
                 file_element.verifiedUsing.append(hash_obj)
 
+        if self.spdx_version == SPDX_VERSION_3_1 and file_obj.size is not None:
+            file_element.software_artifactSize = file_obj.size
+
         # License information will be added via relationships after file creation
 
         self.elements.append(file_element)
@@ -612,15 +690,20 @@ class SPDX3Serializer:
         # GENERATED_FROM is intentionally absent: it is handled by the Build profile
         # (see _create_relationships and _artifact_input_ids).
         type_map = {
-            "HAS_PREREQUISITE": (spdx.RelationshipType.dependsOn, False),
+            "HAS_PREREQUISITE": (spdx.RelationshipType.hasPrerequisite, False),
+            "PREREQUISITE_FOR": (spdx.RelationshipType.hasPrerequisite, True),
             "STATIC_LINK": (spdx.RelationshipType.hasStaticLink, False),
             "CONTAINS": (spdx.RelationshipType.contains, False),
+            "CONTAINED_BY": (spdx.RelationshipType.contains, True),
             "DESCRIBES": (spdx.RelationshipType.describes, False),
+            "DESCRIBED_BY": (spdx.RelationshipType.describes, True),
             "DEPENDS_ON": (spdx.RelationshipType.dependsOn, False),
+            "DEPENDENCY_OF": (spdx.RelationshipType.dependsOn, True),
             "DYNAMIC_LINK": (spdx.RelationshipType.hasDynamicLink, False),
             "BUILD_TOOL_OF": (spdx.RelationshipType.usesTool, True),
             "DEV_TOOL_OF": (spdx.RelationshipType.usesTool, True),
             "TEST_TOOL_OF": (spdx.RelationshipType.usesTool, True),
+            "VARIANT_OF": (spdx.RelationshipType.hasVariant, True),
             "OTHER": (spdx.RelationshipType.other, False),
         }
         return type_map.get(rel_type, (spdx.RelationshipType.other, False))
@@ -705,7 +788,7 @@ class SPDX3Serializer:
             return None
 
         license_expr = spdx.simplelicensing_LicenseExpression()
-        standard_licenses = get_standard_licenses()
+        standard_licenses = get_license_ids()
 
         # Check if it's a standard license ID
         if license_str in standard_licenses:
@@ -764,6 +847,42 @@ class SPDX3Serializer:
         self.relationship_elements.append(rel)
         return rel
 
+    def _document_owned_elements(self, sbom_doc: SBOMDocument):
+        """Yield the package and file elements defined by ``sbom_doc``."""
+        for component in sbom_doc.components.values():
+            package = self.component_elements.get(component.name)
+            if package:
+                yield package
+            for file_obj in component.files.values():
+                file_element = self.file_elements.get(file_obj.path)
+                if file_element:
+                    yield file_element
+
+    def _build_owned_elements(self):
+        """Yield the Build-profile elements, all defined in the build document."""
+        if self.build:
+            yield self.build
+        yield from self.target_builds.values()
+        yield from self.build_tools.values()
+
+    def _element_home_index(self) -> dict:
+        """Map each package/file element id to the document that defines it.
+
+        Every component belongs to exactly one document and every file to exactly
+        one component, so this "home" is unique. Build-profile elements live in the
+        build document. Ids absent from the map (licenses, the tool/agent, well-known
+        individuals) have no single owner and are serialized wherever referenced.
+        """
+        if self._element_home is None:
+            home = {}
+            for doc_name, sbom_doc in self.sbom_data.documents.items():
+                for element in self._document_owned_elements(sbom_doc):
+                    home[element._id] = doc_name
+            for element in self._build_owned_elements():
+                home[element._id] = self._BUILD_DOCUMENT
+            self._element_home = home
+        return self._element_home
+
     def _create_document(self, sbom_doc: SBOMDocument) -> spdx.SpdxDocument:
         """Create an SPDX 3.0 document for a specific SBOMDocument."""
         self._initialize_shared_objects()
@@ -771,8 +890,8 @@ class SPDX3Serializer:
         document = self._new_spdx_document(sbom_doc)
         components = sbom_doc.components.values()
 
-        element_ids = self._collect_document_element_ids(sbom_doc, components)
-        self._populate_document(document, element_ids, components, sbom_doc)
+        element_ids, import_ids = self._collect_document_element_ids(sbom_doc, components)
+        self._populate_document(document, element_ids, import_ids, components, sbom_doc)
 
         self.elements.append(document)
         self.documents[sbom_doc.name] = document
@@ -813,12 +932,17 @@ class SPDX3Serializer:
             document.profileConformance.append(spdx.ProfileIdentifierType.build)
         return document
 
-    def _collect_document_element_ids(self, sbom_doc: SBOMDocument, components) -> set:
+    def _collect_document_element_ids(self, sbom_doc: SBOMDocument, components) -> tuple[set, set]:
         """Gather the IDs of every element that belongs to this document.
 
         This spans the document's packages and files, the licenses they
         reference, the relationships connecting them, and the shared
         tool/agent/data-license elements.
+
+        Returns a ``(element_ids, import_ids)`` pair: ``element_ids`` are defined
+        by this document and serialized into it, while ``import_ids`` are elements
+        referenced by this document's relationships but defined in another document
+        (declared via ExternalMap rather than re-serialized here).
         """
         element_ids = self._package_and_file_ids(components)
         element_ids.update(self._referenced_license_ids(components))
@@ -830,17 +954,26 @@ class SPDX3Serializer:
         # Seed the build document so its build-scoped relationships are collected.
         self._seed_build_element_ids(sbom_doc, element_ids)
 
-        self._collect_relationship_ids(element_ids)
+        import_ids = self._collect_relationship_ids(sbom_doc, element_ids)
 
         if self.tool:
             element_ids.add(self.tool._id)
         if self.creator_agent:
             element_ids.add(self.creator_agent._id)
+        if self.author_agent:
+            element_ids.add(self.author_agent._id)
+        for component in components:
+            supplier_agent = self.organizations.get(component.supplier)
+            if supplier_agent:
+                element_ids.add(supplier_agent._id)
         data_license = self._create_license_expression("CC0-1.0")
         if data_license:
             element_ids.add(data_license._id)
 
-        return element_ids
+        # A locally defined element is never also imported.
+        import_ids -= element_ids
+
+        return element_ids, import_ids
 
     def _package_and_file_ids(self, components) -> set:
         """IDs of the package and file elements contained in this document."""
@@ -887,39 +1020,57 @@ class SPDX3Serializer:
         for tool in self.build_tools.values():
             element_ids.add(tool._id)
 
-    def _collect_relationship_ids(self, element_ids: set):
-        """Add this document's relationships and their endpoints to ``element_ids``.
+    def _collect_relationship_ids(self, sbom_doc: SBOMDocument, element_ids: set) -> set:
+        """Add this document's relationships and their local endpoints to ``element_ids``.
 
         A relationship belongs to the document that owns its original
         (pre-reversal) "from" element. Ownership is tested against a snapshot
         of the document's own elements so that pulling in endpoints does not
         draw in unrelated relationships.
+
+        Endpoints defined in another document are returned as the import set so
+        the caller can declare them via ExternalMap instead of re-serializing
+        them here.
         """
         owned = set(element_ids)
+        home = self._element_home_index()
+        this_doc = sbom_doc.name
         relationship_ids = set()
         endpoint_ids = set()
+        import_ids = set()
         for rel in self.relationship_elements:
             from_id = getattr(rel, 'from_', None)
             original_from_id = self.relationship_original_from.get(rel._id, from_id)
-            if original_from_id in owned:
-                relationship_ids.add(rel._id)
-                if from_id:
-                    endpoint_ids.add(from_id)
-                endpoint_ids.update(rel.to)
+            if original_from_id not in owned:
+                continue
+            relationship_ids.add(rel._id)
+            endpoints = list(rel.to)
+            if from_id:
+                endpoints.append(from_id)
+            for endpoint in endpoints:
+                endpoint_home = home.get(endpoint)
+                if endpoint_home is not None and endpoint_home != this_doc:
+                    import_ids.add(endpoint)
+                else:
+                    endpoint_ids.add(endpoint)
         element_ids.update(relationship_ids)
         element_ids.update(endpoint_ids)
+        return import_ids
 
     def _populate_document(
         self,
         document: spdx.SpdxDocument,
         element_ids: set,
+        import_ids: set,
         components,
         sbom_doc: SBOMDocument,
     ):
-        """Attach the selected elements and root components to the document."""
+        """Attach the selected elements, imports and root components to the document."""
         for element in self.elements:
             if self._belongs_in_document(element, document._id, element_ids):
                 document.element.append(element)
+
+        self._add_external_maps(document, import_ids)
 
         for component in components:
             package = self.component_elements.get(component.name)
@@ -929,6 +1080,22 @@ class SPDX3Serializer:
         # The Build element is a root of the build document.
         if self.build and sbom_doc.name == self._BUILD_DOCUMENT:
             document.rootElement.append(self.build)
+
+    def _add_external_maps(self, document: spdx.SpdxDocument, import_ids: set):
+        """Declare elements used by, but defined outside, this document.
+
+        Each foreign endpoint becomes an ExternalMap in the document's ``import`` set instead of
+        being re-serialized here. ``locationHint`` points at the sibling JSON-LD file that defines
+        the element so a consumer can retrieve it.
+        """
+        home_index = self._element_home_index()
+        for import_id in sorted(import_ids):
+            external_map = spdx.ExternalMap()
+            external_map.externalSpdxId = import_id
+            home = home_index.get(import_id)
+            if home:
+                external_map.locationHint = f"./{home}.jsonld"
+            document.import_.append(external_map)
 
     @staticmethod
     def _belongs_in_document(element, document_id: str, element_ids: set) -> bool:

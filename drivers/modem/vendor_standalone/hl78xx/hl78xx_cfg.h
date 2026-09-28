@@ -47,10 +47,10 @@ int hl78xx_band_cfg(struct hl78xx_data *data, bool *modem_require_restart,
 
 int hl78xx_gsm_pdp_activate(struct hl78xx_data *data);
 
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 int hl78xx_rat_ntn_cfg(struct hl78xx_data *data, bool *modem_require_restart,
 		       enum hl78xx_cell_rat_mode rat_config_request);
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
 int hl78xx_set_apn_internal(struct hl78xx_data *data, const char *apn, uint16_t size);
 
 int hl78xx_get_uart_config(struct hl78xx_data *data);
@@ -79,9 +79,10 @@ int hl78xx_ctzeu_parse_urc(char **argv, uint16_t argc, struct hl78xx_ctzeu_updat
  * @param data HL78XX data structure.
  * @param argv Tokenized URC arguments from modem chat.
  * @param argc Number of tokens in argv.
- * @param is_urc Indicates if the message is a URC.
+ * @param has_n_param Indicates if argv includes the query response <n> field.
  */
-void hl78xx_parse_cereg_info(struct hl78xx_data *data, char **argv, uint16_t argc, bool is_urc);
+void hl78xx_parse_cereg_info(struct hl78xx_data *data, char **argv, uint16_t argc,
+			     bool has_n_param);
 
 /**
  * @brief Set network operator format.
@@ -101,8 +102,9 @@ int hl78xx_set_network_operator_format(struct hl78xx_data *data,
  * @param mnc Pointer to store the Mobile Network Code.
  * @return true if parsing was successful, false otherwise.
  */
+/* clang-format off */
 bool hl78xx_parse_plmn(const char *operator, uint16_t *mcc, uint16_t *mnc);
-
+/* clang-format on */
 /**
  * @brief Convert an active band hex bitmap string to a band number.
  *
@@ -192,13 +194,51 @@ uint32_t hl78xx_edrx_idle_get_remaining_timetosleep(struct hl78xx_data *data);
 void hl78xx_psmev_init(struct hl78xx_data *data);
 #endif /* CONFIG_MODEM_HL78XX_PSM */
 
-int binary_str_to_byte(const char *bin_str);
-void byte_to_binary_str(uint8_t byte, char *output);
 #endif /* CONFIG_MODEM_HL78XX_LOW_POWER_MODE */
+void byte_to_binary_str(uint8_t byte, char *output);
+int binary_str_to_byte(const char *bin_str);
 
 bool hl78xx_is_rsrp_value_valid(int16_t rsrp);
 bool hl78xx_is_rsrq_value_valid(int16_t rsrq);
 bool hl78xx_is_sinr_value_valid(int16_t sinr);
 bool hl78xx_is_rsrp_valid(struct hl78xx_data *data);
+
+/**
+ * @brief Recover the modem NB-IoT/ LTE band configuration.
+ *
+ * @param data HL78xx driver data.
+ * @param failure Original script failure context.
+ *
+ * @retval 0 on success.
+ * @retval negative errno value on failure.
+ */
+int hl78xx_recover_kbndcfg(struct hl78xx_data *data, const struct hl78xx_script_failure *failure);
+
+/**
+ * @brief Recover the modem KSUP configuration.
+ *
+ * @param data HL78xx driver data.
+ * @param failure Original script failure context.
+ *
+ * @retval 0 on success.
+ * @retval negative errno value on failure.
+ */
+int hl78xx_recover_post_restart_timeout(struct hl78xx_data *data,
+					const struct hl78xx_script_failure *failure);
+
+/**
+ * @brief Recover an init script whose command went unanswered by retrying it.
+ *
+ * Pure retry: performs no repair of its own and always succeeds, so the rule's
+ * resume_state re-runs the init script. Pair with a bounded max_attempts —
+ * exhaustion falls back to the reset pulse.
+ *
+ * @param data HL78xx driver data.
+ * @param failure Original script failure context.
+ *
+ * @retval 0 always.
+ */
+int hl78xx_recover_init_script_retry(struct hl78xx_data *data,
+				     const struct hl78xx_script_failure *failure);
 
 #endif /* ZEPHYR_DRIVERS_MODEM_HL78XX_HL78XX_CFG_H_ */

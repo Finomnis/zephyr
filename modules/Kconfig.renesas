@@ -211,6 +211,11 @@ config USE_RA_FSP_USB_DEVICE
 	help
 	  Enable RA FSP USB Device Controller driver
 
+config USE_RA_FSP_USB_HOST
+	bool
+	help
+	  Enable RA FSP USB Host Controller driver
+
 config USE_RA_FSP_SDRAM
 	bool
 	help
@@ -324,6 +329,16 @@ config USE_RA_FSP_DRW
 	bool
 	help
 	  Enable RA FSP DRW driver
+
+config USE_RA_FSP_SCI_B_LIN
+	bool
+	help
+	  Enable RA FSP SCI-B LIN driver
+
+config USE_RA_FSP_ADC_B
+	bool
+	help
+	  Enable RX FSP ADC-B driver
 
 endif # HAS_RENESAS_RA_FSP
 
@@ -453,6 +468,16 @@ config USE_RZ_FSP_QSPI_SPIBSC
 	bool
 	help
 	  Enable RZ FSP QSPI SPIBSC driver
+
+config USE_RZ_FSP_DISPLAY
+	bool
+	help
+	  Enable RZ FSP Display driver
+
+config USE_RZ_FSP_MIPI_DSI
+	bool
+	help
+	  Enable RZ FSP MIPI-DSI driver
 
 endif
 

@@ -128,6 +128,7 @@ struct net_icmpv6_ptb {
 #define NET_ICMPV6_ND_OPT_TLLAO       2
 #define NET_ICMPV6_ND_OPT_PREFIX_INFO 3
 #define NET_ICMPV6_ND_OPT_MTU         5
+#define NET_ICMPV6_ND_OPT_NONCE       14
 #define NET_ICMPV6_ND_OPT_ROUTE       24
 #define NET_ICMPV6_ND_OPT_RDNSS       25
 #define NET_ICMPV6_ND_OPT_DNSSL       31
@@ -152,6 +153,7 @@ struct net_icmpv6_ptb {
 #define NET_ICMPV6_RA           134	/* Router Advertisement */
 #define NET_ICMPV6_NS           135	/* Neighbor Solicitation */
 #define NET_ICMPV6_NA           136	/* Neighbor Advertisement */
+#define NET_ICMPV6_REDIRECT     137	/* Redirect */
 #define NET_ICMPV6_MLDv2        143	/* Multicast Listener Report v2 */
 
 /* Codes for ICMPv6 Destination Unreachable message */

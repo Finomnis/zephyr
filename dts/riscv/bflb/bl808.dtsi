@@ -22,6 +22,11 @@
 		status = "disabled";
 	};
 
+	bt_hci_bflb: bt-hci {
+		compatible = "bflb,bt-hci";
+		status = "disabled";
+	};
+
 	clocks {
 		clk_rc32m: clk-rc32m {
 			#clock-cells = <0>;
@@ -355,6 +360,7 @@
 		sf_ctrl: sf@2000b000 {
 			compatible = "bflb,sf-controller";
 			reg = <0x2000b000 0x1000>;
+			ranges;
 			#address-cells = <1>;
 			#size-cells = <1>;
 

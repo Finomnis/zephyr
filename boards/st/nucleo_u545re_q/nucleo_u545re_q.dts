@@ -21,6 +21,7 @@
 		zephyr,flash = &flash0;
 		zephyr,canbus = &fdcan1;
 		zephyr,code-partition = &slot0_partition;
+		zephyr,system-timer = &lptim1;
 	};
 
 	aliases {
@@ -179,19 +180,25 @@
 	status = "okay";
 };
 
+&adc12_common {
+	st,adc-prescaler = <4>;
+	status = "okay";
+};
+
+&adc4_common {
+	st,adc-prescaler = <4>;
+	status = "okay";
+};
+
 &adc1 {
 	pinctrl-0 = <&adc1_in5_pa0 &adc1_in6_pa1>; /* Arduino A0 & A1 */
 	pinctrl-names = "default";
-	st,adc-clock-source = "ASYNC";
-	st,adc-prescaler = <4>;
 	status = "okay";
 };
 
 &adc4 {
 	pinctrl-0 = <&adc4_in18_pb0>; /* Arduino A3 */
 	pinctrl-names = "default";
-	st,adc-clock-source = "ASYNC";
-	st,adc-prescaler = <4>;
 	status = "okay";
 };
 
@@ -248,7 +255,7 @@
 	};
 };
 
-stm32_lp_tick_source: &lptim1 {
+&lptim1 {
 	clocks = <&rcc STM32_CLOCK(APB3, 11)>,
 		 <&rcc STM32_SRC_LSI LPTIM1_SEL(1)>;
 	status = "okay";

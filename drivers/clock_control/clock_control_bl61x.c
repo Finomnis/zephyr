@@ -1187,7 +1187,9 @@ static __bflb_critfunc void clock_control_bl61x_init_root_as_crystal(const struc
 	clock_bflb_set_root_clock(BFLB_MAIN_CLOCK_XTAL);
 }
 
-static __ramfunc void clock_control_bl61x_update_flash_clk(const struct device *dev)
+static __ramfunc void clock_control_bl61x_update_flash_clk(const struct device *dev,
+							   const enum bl61x_clkid source,
+							   bool final)
 {
 	struct clock_control_bl61x_data *data = dev->data;
 	volatile uint32_t tmp;
@@ -1201,11 +1203,11 @@ static __ramfunc void clock_control_bl61x_update_flash_clk(const struct device *
 	tmp = *(volatile uint32_t *)(GLB_BASE + GLB_SF_CFG0_OFFSET);
 	tmp &= GLB_SF_CLK_SEL_UMSK;
 	tmp &= GLB_SF_CLK_SEL2_UMSK;
-	if (data->flashclk.source == bl61x_clkid_clk_wifipll) {
+	if (source == bl61x_clkid_clk_wifipll) {
 		clk = clock_control_bl61x_get_hclk(dev);
 		tmp |= 0U << GLB_SF_CLK_SEL_POS;
 		tmp |= 0U << GLB_SF_CLK_SEL2_POS;
-	} else if (data->flashclk.source == bl61x_clkid_clk_crystal) {
+	} else if (source == bl61x_clkid_clk_crystal) {
 		clk = clock_control_bl61x_get_xclk(dev);
 		tmp |= 0U << GLB_SF_CLK_SEL_POS;
 		tmp |= 1U << GLB_SF_CLK_SEL2_POS;
@@ -1218,12 +1220,12 @@ static __ramfunc void clock_control_bl61x_update_flash_clk(const struct device *
 	/* If flash controller will manage flash, set to standard speed
 	 * and let it set the divider.
 	 */
-#if defined(CONFIG_SOC_FLASH_BFLB)
-	clk = DIV_ROUND_CLOSEST(clk, BL61X_TARGET_BASIC_CLOCK);
-	tmp |= clamp(clk - 1, 0x0, 0x7) << GLB_SF_CLK_DIV_POS;
-#else
-	tmp |= (data->flashclk.divider - 1) << GLB_SF_CLK_DIV_POS;
-#endif
+	if (IS_ENABLED(CONFIG_SOC_FLASH_BFLB) || !final) {
+		clk = DIV_ROUND_CLOSEST(clk, BL61X_TARGET_BASIC_CLOCK);
+		tmp |= clamp(clk - 1, 0x0, 0x7) << GLB_SF_CLK_DIV_POS;
+	} else {
+		tmp |= (data->flashclk.divider - 1) << GLB_SF_CLK_DIV_POS;
+	}
 
 	*(volatile uint32_t *)(GLB_BASE + GLB_SF_CFG0_OFFSET) = tmp;
 
@@ -1348,6 +1350,8 @@ static __bflb_critfunc int clock_control_bl61x_update_clocks(const struct device
 		return -EIO;
 	}
 
+	clock_control_bl61x_update_flash_clk(dev, bl61x_clkid_clk_rc32m, false);
+
 	ret = clock_control_bl61x_update_f32k(dev);
 	if (ret < 0) {
 		return ret;
@@ -1408,6 +1412,8 @@ static __bflb_critfunc int clock_control_bl61x_update_clocks(const struct device
 	} else {
 		/* Root clock already setup as RC32M */
 	}
+
+	clock_control_bl61x_update_flash_clk(dev, data->flashclk.source, true);
 
 	ret = clock_control_bl61x_clock_trim_32M();
 	if (ret < 0) {
@@ -1548,7 +1554,11 @@ static void clock_control_bl61x_peripheral_clock_init(void)
 	regval |= (1 << 22);
 	sys_write32(regval, GLB_BASE + GLB_CGEN_CFG2_OFFSET);
 
-	clock_control_bl61x_uart_set_clock(true, 0, 2);
+	/*
+	 * BCLK / 4 = 20 MHz. Must divide evenly into standard CAN bitrates:
+	 * the BL61x CAN controller core clock is the UART clock / 2.
+	 */
+	clock_control_bl61x_uart_set_clock(true, 0, 3);
 }
 
 static int clock_control_bl61x_on(const struct device *dev, clock_control_subsys_t sys)
@@ -1746,8 +1756,6 @@ static int clock_control_bl61x_init(const struct device *dev)
 	clock_control_bl61x_peripheral_clock_init();
 
 	clock_bflb_settle();
-
-	clock_control_bl61x_update_flash_clk(dev);
 
 	irq_unlock(key);
 

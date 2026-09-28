@@ -10,6 +10,7 @@
 #include <kernel_internal.h>
 #include <kswap.h>
 #include <zephyr/toolchain.h>
+#include <zephyr/tracing/tracing.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/offsets.h>
 #include <zephyr/zsr.h>
@@ -18,6 +19,8 @@
 #include <xtensa_exc.h>
 #include <xtensa_internal.h>
 #include <xtensa_stack.h>
+
+#include <xtensa_breadcrumb.h>
 
 LOG_MODULE_DECLARE(os, CONFIG_KERNEL_LOG_LEVEL);
 
@@ -276,6 +279,19 @@ static ALWAYS_INLINE void usage_stop(void)
 #endif
 }
 
+static ALWAYS_INLINE void isr_enter_hook(void)
+{
+#if defined(CONFIG_TRACING_ISR) || defined(CONFIG_SYS_IDLE_HOOKS)
+	/* Xtensa waits for the interrupt with interrupts enabled ("waiti 0"),
+	 * so this ISR can have interrupted the idle thread and may reschedule
+	 * away from it before the idle-exit hook gets a chance to run. Notifying
+	 * here is what lets the CPU load module close the idle window at the
+	 * instant idle actually ended.
+	 */
+	sys_trace_isr_enter();
+#endif
+}
+
 static inline void *return_to(void *interrupted)
 {
 #ifdef CONFIG_MULTITHREADING
@@ -499,6 +515,7 @@ __unused static void xtensa_handle_irq_lvl(int irq_lvl)
 #define DEF_INT_C_HANDLER(l)                                                                       \
 	__unused void *xtensa_int##l##_c(void *interrupted_stack)                                  \
 	{                                                                                          \
+		isr_enter_hook();                                                                  \
 		usage_stop();                                                                      \
 		xtensa_handle_irq_lvl(l);                                                          \
 		return return_to(interrupted_stack);                                               \
@@ -671,6 +688,8 @@ void *xtensa_excint1_c(void *esf)
 
 		ps = bsa->ps;
 		pc = (void *)bsa->pc;
+
+		XTENSA_RECORD_FATAL_BREADCRUMB(bsa, cause);
 
 		/* We intentionally use "ill" (illegal instruction) as a trap for custom exceptions.
 		 * So we need to find out if the illegal instruction is legit.

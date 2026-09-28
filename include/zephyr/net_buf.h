@@ -24,7 +24,7 @@ extern "C" {
  * @brief Network buffer library
  * @defgroup net_buf Network Buffer Library
  * @since 1.0
- * @version 1.0.0
+ * @version 1.1.0
  * @ingroup os_services
  * @{
  */
@@ -93,7 +93,8 @@ struct net_buf_simple {
 	/**
 	 * Length of the data behind the data pointer.
 	 *
-	 * To determine the max length, use net_buf_simple_max_len(), not #size!
+	 * The room left for more data is net_buf_simple_tailroom(), not net_buf_simple::size
+	 * minus net_buf_simple::len: net_buf_simple::size counts the headroom as well.
 	 */
 	uint16_t len;
 
@@ -940,13 +941,51 @@ static inline size_t net_buf_simple_tailroom(const struct net_buf_simple *buf)
  *
  * This value is depending on the number of bytes being reserved as headroom.
  *
+ * @deprecated Use net_buf_simple_tailroom() to find out how much data can
+ *             still be added and net_buf_simple_headroom() for how much can
+ *             be pushed in front. The size of a scratch area starting at
+ *             net_buf_simple::data is net_buf_simple::len plus the tailroom.
+ *
  * @param buf A valid pointer on a buffer
  *
  * @return Number of bytes usable behind the net_buf_simple::data pointer.
  */
-static inline uint16_t net_buf_simple_max_len(const struct net_buf_simple *buf)
+__deprecated static inline uint16_t net_buf_simple_max_len(const struct net_buf_simple *buf)
 {
 	return buf->size - net_buf_simple_headroom(buf);
+}
+
+/**
+ * @brief Check that a buffer's length and pointers are self-consistent.
+ *
+ * Validates the invariant that must always hold for a well-formed buffer:
+ * @c data points within the backing storage and @c len does not extend past
+ * the end of that storage. A buffer whose #net_buf_simple::len has been
+ * corrupted (for example wrapped to a large value) or whose #net_buf_simple::data
+ * has been moved outside @c __buf..__buf+size fails this check.
+ *
+ * This does not (and cannot) detect a @c len that was changed to a different
+ * but still in-bounds value; it detects only out-of-bounds corruption, which is
+ * what turns into an out-of-bounds read or write when the buffer is used.
+ *
+ * @param buf Buffer to validate.
+ *
+ * @return true if the buffer is self-consistent, false otherwise.
+ */
+static inline bool net_buf_simple_is_valid(const struct net_buf_simple *buf)
+{
+	size_t headroom;
+
+	if (buf == NULL || buf->__buf == NULL || buf->data < buf->__buf) {
+		return false;
+	}
+
+	headroom = net_buf_simple_headroom(buf);
+	if (headroom > buf->size) {
+		return false;
+	}
+
+	return (size_t)buf->len <= (size_t)(buf->size - headroom);
 }
 
 /**
@@ -2658,13 +2697,38 @@ static inline size_t net_buf_headroom(const struct net_buf *buf)
  *
  * This value is depending on the number of bytes being reserved as headroom.
  *
+ * @deprecated Use net_buf_tailroom() to find out how much data can still be
+ *             added and net_buf_headroom() for how much can be pushed in
+ *             front. The size of a scratch area starting at net_buf::data is
+ *             net_buf::len plus the tailroom.
+ *
  * @param buf A valid pointer on a buffer
  *
  * @return Number of bytes usable behind the net_buf::data pointer.
  */
-static inline uint16_t net_buf_max_len(const struct net_buf *buf)
+__deprecated static inline uint16_t net_buf_max_len(const struct net_buf *buf)
 {
-	return net_buf_simple_max_len(&buf->b);
+	return buf->size - net_buf_headroom(buf);
+}
+
+/**
+ * @brief Check that a buffer's length and pointers are self-consistent.
+ *
+ * Checks that the buffer is still referenced (net_buf::ref is non-zero, so
+ * the buffer has not been returned to its pool) and that its underlying
+ * net_buf_simple passes net_buf_simple_is_valid(). Useful as a guard at
+ * "use" boundaries (e.g. before transmitting or copying out @c len bytes)
+ * to drop a freed or corrupted buffer instead of accessing memory out of
+ * bounds.
+ *
+ * @param buf Buffer to validate.
+ *
+ * @return true if the buffer is referenced and self-consistent, false
+ *         otherwise.
+ */
+static inline bool net_buf_is_valid(const struct net_buf *buf)
+{
+	return buf != NULL && buf->ref > 0 && net_buf_simple_is_valid(&buf->b);
 }
 
 /**

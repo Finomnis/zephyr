@@ -13,6 +13,10 @@
 
 #define CONFIG_GEN_IRQ_START_VECTOR 0
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @cond INTERNAL_HIDDEN
  */
@@ -172,12 +176,6 @@ int z_soc_irq_is_enabled(unsigned int irq);
 
 #define arch_irq_is_enabled(irq)	z_soc_irq_is_enabled(irq)
 
-#ifdef CONFIG_DYNAMIC_INTERRUPTS
-extern int z_soc_irq_connect_dynamic(unsigned int irq, unsigned int priority,
-				     void (*routine)(const void *parameter),
-				     const void *parameter, uint32_t flags);
-#endif
-
 #else
 
 #define CONFIG_NUM_IRQS XCHAL_NUM_INTERRUPTS
@@ -300,6 +298,10 @@ static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
  * @return True if interrupt is enabled, false otherwise.
  */
 int xtensa_irq_is_enabled(unsigned int irq);
+
+#ifdef __cplusplus
+}
+#endif
 
 #include <zephyr/irq.h>
 

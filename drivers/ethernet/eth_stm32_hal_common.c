@@ -6,7 +6,6 @@
  */
 
 #include <zephyr/device.h>
-#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/irq.h>
 #include <zephyr/logging/log.h>
@@ -15,7 +14,6 @@
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/lldp.h>
 #include <zephyr/net/phy.h>
-#include <zephyr/sys/crc.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/__assert.h>
@@ -29,14 +27,12 @@
 
 LOG_MODULE_REGISTER(eth_stm32_hal, CONFIG_ETHERNET_LOG_LEVEL);
 
+#include "dwc_mac/eth_stm32_dwc.h"
+
 #if defined(CONFIG_ETH_STM32_HAL_USE_DTCM_FOR_DMA_BUFFER) &&                                       \
 	!DT_NODE_HAS_STATUS_OKAY(DT_CHOSEN(zephyr_dtcm))
 #error DTCM for DMA buffer is activated but zephyr,dtcm is not present in dts
 #endif
-
-#define ST_OUI_B0 0x00
-#define ST_OUI_B1 0x80
-#define ST_OUI_B2 0xE1
 
 #define ETH_STM32_HAL_MTU            NET_ETH_MTU
 #define ETH_STM32_HAL_FRAME_SIZE_MAX (ETH_STM32_HAL_MTU + 18)
@@ -99,15 +95,8 @@ static int eth_initialize(const struct device *dev)
 
 	/* Set up gated and source clocks */
 	for (size_t n = 0; n < cfg->pclken_cnt; n++) {
-		if (IN_RANGE(cfg->pclken[n].bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
-			ret = clock_control_on(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
-					       (clock_control_subsys_t)&cfg->pclken[n]);
-		} else {
-			ret = clock_control_configure(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
-						      (clock_control_subsys_t)&cfg->pclken[n],
-						      NULL);
-		}
-
+		ret = clock_control_on(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
+				       (clock_control_subsys_t)&cfg->pclken[n]);
 		if (ret != 0) {
 			LOG_ERR("Failed to setup ethernet clock #%zu", n);
 			return -EIO;
@@ -121,29 +110,8 @@ static int eth_initialize(const struct device *dev)
 		return ret;
 	}
 
-	ret = net_eth_mac_load(&cfg->mac_cfg, dev_data->mac_addr);
-	if (ret == -ENODATA) {
-		uint8_t unique_device_ID_12_bytes[12];
-		uint32_t result_mac_32_bits;
-
-		/**
-		 * Set MAC address locally administered bit (LAA) as this is not assigned by the
-		 * manufacturer
-		 */
-		dev_data->mac_addr[0] = ST_OUI_B0 | 0x02;
-		dev_data->mac_addr[1] = ST_OUI_B1;
-		dev_data->mac_addr[2] = ST_OUI_B2;
-
-		/* Nothing defined by the user, use device id */
-		hwinfo_get_device_id(unique_device_ID_12_bytes, 12);
-		result_mac_32_bits = crc32_ieee((uint8_t *)unique_device_ID_12_bytes, 12);
-		memcpy(&dev_data->mac_addr[3], &result_mac_32_bits, 3);
-
-		ret = 0;
-	}
-
+	ret = eth_stm32_net_eth_mac_load(&cfg->mac_cfg, dev_data->mac_addr);
 	if (ret < 0) {
-		LOG_ERR("Failed to load MAC address (%d)", ret);
 		return ret;
 	}
 
@@ -249,8 +217,6 @@ static void eth_iface_init(struct net_if *iface)
 
 	net_if_carrier_off(iface);
 
-	net_lldp_set_lldpdu(iface);
-
 	if (device_is_ready(cfg->phy_dev)) {
 		phy_link_callback_set(cfg->phy_dev, phy_link_state_changed, (void *)dev);
 	} else {
@@ -282,9 +248,6 @@ static enum ethernet_hw_caps eth_stm32_hal_get_capabilities(const struct device 
 #endif
 #if defined(CONFIG_NET_PROMISCUOUS_MODE)
 	       | ETHERNET_PROMISC_MODE
-#endif
-#if defined(CONFIG_PTP_CLOCK_STM32_HAL)
-	       | ETHERNET_PTP
 #endif
 #if defined(CONFIG_NET_LLDP)
 	       | ETHERNET_LLDP

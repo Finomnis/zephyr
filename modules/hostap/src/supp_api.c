@@ -164,7 +164,6 @@ static void supp_shell_connect_status(struct k_work *work)
 {
 	static int seconds_counter;
 	int status = CONNECTION_SUCCESS;
-	int conn_result = CONNECTION_FAILURE;
 	struct wpa_supplicant *wpa_s;
 	struct wpa_supp_api_ctrl *ctrl = &wpas_api_ctrl;
 
@@ -188,10 +187,8 @@ static void supp_shell_connect_status(struct k_work *work)
 				goto out;
 			}
 
-			conn_result = -ETIMEDOUT;
-			supplicant_send_wifi_mgmt_event(wpa_s->ifname,
-							NET_EVENT_WIFI_CMD_CONNECT_RESULT,
-							(void *)&conn_result, sizeof(int));
+			supplicant_send_wifi_mgmt_conn_status(wpa_s,
+							      WIFI_STATUS_CONN_TIMEOUT);
 			status = CONNECTION_FAILURE;
 			goto out;
 		}
@@ -317,9 +314,18 @@ static inline int chan_to_freq(int chan)
 	return freq;
 }
 
-enum wifi_frequency_bands wpas_band_to_zephyr(enum wpa_radio_work_band band)
+enum wifi_frequency_bands wpas_freq_to_zephyr_band(int freq)
 {
-	switch (band) {
+	if (freq <= 0) {
+		return WIFI_FREQ_BAND_UNKNOWN;
+	}
+
+	/* The supplicant lumps 6 GHz in with 5 GHz, so ask separately. */
+	if (is_6ghz_freq(freq)) {
+		return WIFI_FREQ_BAND_6_GHZ;
+	}
+
+	switch (wpas_freq_to_band(freq)) {
 	case BAND_2_4_GHZ:
 		return WIFI_FREQ_BAND_2_4_GHZ;
 	case BAND_5_GHZ:
@@ -448,6 +454,7 @@ enum wifi_security_type wpas_key_mgmt_to_zephyr(bool is_hapd, void *config, int 
 	case WPA_KEY_MGMT_SAE | WPA_KEY_MGMT_PSK_SHA256:
 	case WPA_KEY_MGMT_SAE | WPA_KEY_MGMT_PSK_SHA256 | WPA_KEY_MGMT_PSK:
 		return WIFI_SECURITY_TYPE_WPA_AUTO_PERSONAL;
+	case WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_FT_PSK:
 	case WPA_KEY_MGMT_FT_PSK:
 		return WIFI_SECURITY_TYPE_FT_PSK;
 	case WPA_KEY_MGMT_FT_SAE:
@@ -803,8 +810,11 @@ static int wpas_add_and_config_network(struct wpa_supplicant *wpa_s,
 			goto out;
 		}
 
-		/* SAP - only open and WPA2-PSK are supported for now */
-		if (mode_ap && params->security != WIFI_SECURITY_TYPE_PSK) {
+		/* SAP - only open, WPA2-PSK and WPA3-SAE are supported for now */
+		if (mode_ap && params->security != WIFI_SECURITY_TYPE_PSK &&
+		    params->security != WIFI_SECURITY_TYPE_SAE &&
+		    params->security != WIFI_SECURITY_TYPE_SAE_H2E &&
+		    params->security != WIFI_SECURITY_TYPE_SAE_AUTO) {
 			ret = -1;
 			wpa_printf(MSG_ERROR, "Unsupported security type: %d",
 				params->security);
@@ -881,6 +891,16 @@ static int wpas_add_and_config_network(struct wpa_supplicant *wpa_s,
 			}
 
 			if (!wpa_cli_cmd_v("set_network %d pairwise CCMP", resp.network_id)) {
+				goto out;
+			}
+
+			/*
+			 * WPA3-SAE mandates management-frame protection; honor
+			 * the requested MFP level (callers must request at least
+			 * WIFI_MFP_OPTIONAL for SAE).
+			 */
+			if (!wpa_cli_cmd_v("set_network %d ieee80211w %d",
+					   resp.network_id, params->mfp)) {
 				goto out;
 			}
 		}
@@ -1087,9 +1107,14 @@ static int wpas_add_and_config_network(struct wpa_supplicant *wpa_s,
 			if (params->security == WIFI_SECURITY_TYPE_EAP_PEAP_MSCHAPV2 ||
 			    params->security == WIFI_SECURITY_TYPE_EAP_PEAP_GTC ||
 			    params->security == WIFI_SECURITY_TYPE_EAP_PEAP_TLS) {
-				snprintk(phase1, sizeof(phase1),
-					 "peapver=%d peaplabel=0 crypto_binding=0",
-					 params->eap_ver);
+				if (params->eap_ver == -1) {
+					snprintk(phase1, sizeof(phase1),
+						"peaplabel=0 crypto_binding=0");
+				} else {
+					snprintk(phase1, sizeof(phase1),
+						"peapver=%d peaplabel=0 crypto_binding=0",
+						params->eap_ver);
+				}
 
 				if (!wpa_cli_cmd_v("set_network %d phase1 \"%s\"", resp.network_id,
 						   &phase1[0])) {
@@ -1139,9 +1164,9 @@ static int wpas_add_and_config_network(struct wpa_supplicant *wpa_s,
 				}
 			}
 
-			if (false == ((params->security == WIFI_SECURITY_TYPE_EAP_PEAP_MSCHAPV2 ||
-			    params->security == WIFI_SECURITY_TYPE_EAP_TTLS_MSCHAPV2) &&
-			    (!params->verify_peer_cert))) {
+			if (false == (params->security == WIFI_SECURITY_TYPE_EAP_PEAP_MSCHAPV2 ||
+			    params->security == WIFI_SECURITY_TYPE_EAP_TTLS_MSCHAPV2 ||
+				params->security == WIFI_SECURITY_TYPE_EAP_PEAP_GTC)) {
 				if (wpas_config_process_blob(wpa_s->conf, "ca_cert",
 						   enterprise_creds.ca_cert,
 						   enterprise_creds.ca_cert_len)) {
@@ -1152,71 +1177,85 @@ static int wpas_add_and_config_network(struct wpa_supplicant *wpa_s,
 						   resp.network_id)) {
 					goto out;
 				}
-			}
 
-			if (wpas_config_process_blob(wpa_s->conf, "client_cert",
-					   enterprise_creds.client_cert,
-					   enterprise_creds.client_cert_len)) {
-				goto out;
-			}
+				if (wpas_config_process_blob(wpa_s->conf, "client_cert",
+						enterprise_creds.client_cert,
+						enterprise_creds.client_cert_len)) {
+					goto out;
+				}
 
-			if (!wpa_cli_cmd_v("set_network %d client_cert \"blob://client_cert\"",
-					   resp.network_id)) {
-				goto out;
-			}
+				if (!wpa_cli_cmd_v("set_network %d client_cert \"blob://client_cert\"",
+						resp.network_id)) {
+					goto out;
+				}
 
-			if (wpas_config_process_blob(wpa_s->conf, "private_key",
-					   enterprise_creds.client_key,
-					   enterprise_creds.client_key_len)) {
-				goto out;
-			}
+				if (wpas_config_process_blob(wpa_s->conf, "private_key",
+						enterprise_creds.client_key,
+						enterprise_creds.client_key_len)) {
+					goto out;
+				}
 
-			if (!wpa_cli_cmd_v("set_network %d private_key \"blob://private_key\"",
-					   resp.network_id)) {
-				goto out;
-			}
+				if (!wpa_cli_cmd_v("set_network %d private_key \"blob://private_key\"",
+						resp.network_id)) {
+					goto out;
+				}
 
-			if (!wpa_cli_cmd_v("set_network %d private_key_passwd \"%s\"",
-					   resp.network_id, params->key_passwd)) {
-				goto out;
-			}
+				if (!wpa_cli_cmd_v("set_network %d private_key_passwd \"%s\"",
+						resp.network_id, params->key_passwd)) {
+					goto out;
+				}
 
-			if (wpas_config_process_blob(wpa_s->conf, "ca_cert2",
-						     enterprise_creds.ca_cert2,
-						     enterprise_creds.ca_cert2_len)) {
-				goto out;
-			}
+				if (wpas_config_process_blob(wpa_s->conf, "ca_cert2",
+								enterprise_creds.ca_cert2,
+								enterprise_creds.ca_cert2_len)) {
+					goto out;
+				}
 
-			if (!wpa_cli_cmd_v("set_network %d ca_cert2 \"blob://ca_cert2\"",
-					   resp.network_id)) {
-				goto out;
-			}
+				if (!wpa_cli_cmd_v("set_network %d ca_cert2 \"blob://ca_cert2\"",
+						resp.network_id)) {
+					goto out;
+				}
 
-			if (wpas_config_process_blob(wpa_s->conf, "client_cert2",
-						     enterprise_creds.client_cert2,
-						     enterprise_creds.client_cert2_len)) {
-				goto out;
-			}
+				if (wpas_config_process_blob(wpa_s->conf, "client_cert2",
+							enterprise_creds.client_cert2,
+							enterprise_creds.client_cert2_len)) {
+					goto out;
+				}
 
-			if (!wpa_cli_cmd_v("set_network %d client_cert2 \"blob://client_cert2\"",
-					   resp.network_id)) {
-				goto out;
-			}
+				if (!wpa_cli_cmd_v("set_network %d client_cert2 \"blob://client_cert2\"",
+						resp.network_id)) {
+					goto out;
+				}
 
-			if (wpas_config_process_blob(wpa_s->conf, "private_key2",
-						     enterprise_creds.client_key2,
-						     enterprise_creds.client_key2_len)) {
-				goto out;
-			}
+				if (wpas_config_process_blob(wpa_s->conf, "private_key2",
+								enterprise_creds.client_key2,
+								enterprise_creds.client_key2_len)) {
+					goto out;
+				}
 
-			if (!wpa_cli_cmd_v("set_network %d private_key2 \"blob://private_key2\"",
-					   resp.network_id)) {
-				goto out;
-			}
+				if (!wpa_cli_cmd_v("set_network %d private_key2 \"blob://private_key2\"",
+						resp.network_id)) {
+					goto out;
+				}
 
-			if (!wpa_cli_cmd_v("set_network %d private_key2_passwd \"%s\"",
-					   resp.network_id, params->key2_passwd)) {
-				goto out;
+				if (!wpa_cli_cmd_v("set_network %d private_key2_passwd \"%s\"",
+						resp.network_id, params->key2_passwd)) {
+					goto out;
+				}
+			} else if (params->verify_peer_cert) {
+				/* If we're using MSCHAPV2 and we're
+				 * requested a CA cert valid, load it
+				 */
+				if (wpas_config_process_blob(wpa_s->conf, "ca_cert",
+						enterprise_creds.ca_cert,
+						enterprise_creds.ca_cert_len)) {
+					goto out;
+				}
+
+				if (!wpa_cli_cmd_v("set_network %d ca_cert \"blob://ca_cert\"",
+						resp.network_id)) {
+					goto out;
+				}
 			}
 #endif
 #ifdef CONFIG_WEP
@@ -1477,6 +1516,14 @@ int supplicant_connect(const struct device *dev __unused, struct net_if *iface,
 		goto out;
 	}
 
+	/* The supplicant only clears these once it associates, so drop the codes of
+	 * the previous request to keep them from being reported against this one.
+	 * Configuring the network ends with select_network, which already starts
+	 * the attempt, so this has to happen before that.
+	 */
+	wpa_s->auth_status_code = WLAN_STATUS_SUCCESS;
+	wpa_s->assoc_status_code = WLAN_STATUS_SUCCESS;
+
 	ret = wpas_add_and_config_network(wpa_s, params, false);
 	if (ret) {
 		wpa_printf(MSG_ERROR, "Failed to add and configure network for STA mode: %d", ret);
@@ -1504,6 +1551,17 @@ int supplicant_disconnect(const struct device *dev __unused, struct net_if *ifac
 
 enum wifi_mfp_options get_mfp(enum mfp_options supp_mfp_option)
 {
+	/*
+	 * MGMT_FRAME_PROTECTION_DEFAULT is not an enum mfp_options member, so
+	 * it has to be checked before the switch. It marks a network with no
+	 * explicit ieee80211w setting, whose effective value is only known
+	 * after resolving it against the global "pmf" setting, the key
+	 * management and the driver capabilities (see wpas_get_ssid_pmf()).
+	 */
+	if (supp_mfp_option == MGMT_FRAME_PROTECTION_DEFAULT) {
+		return WIFI_MFP_UNKNOWN;
+	}
+
 	switch (supp_mfp_option) {
 	case NO_MGMT_FRAME_PROTECTION:
 		return WIFI_MFP_DISABLE;
@@ -1572,7 +1630,7 @@ int supplicant_status(const struct device *dev __unused, struct net_if *iface,
 
 	if (wpa_s->wpa_state >= WPA_ASSOCIATED) {
 		struct wpa_ssid *ssid = wpa_s->current_ssid;
-		u8 channel;
+		u8 channel = 0;
 		struct signal_poll_resp signal_poll;
 		u8 *_ssid;
 		size_t ssid_len;
@@ -1592,7 +1650,7 @@ int supplicant_status(const struct device *dev __unused, struct net_if *iface,
 		key_mgmt = ssid->key_mgmt;
 		sae_pwe = wpa_s->conf->sae_pwe;
 		os_memcpy(status->bssid, wpa_s->bssid, WIFI_MAC_ADDR_LEN);
-		status->band = wpas_band_to_zephyr(wpas_freq_to_band(wpa_s->assoc_freq));
+		status->band = wpas_freq_to_zephyr_band(wpa_s->assoc_freq);
 		status->wpa3_ent_type = wpas_key_mgmt_to_zephyr_wpa3_ent(key_mgmt);
 		status->security = wpas_key_mgmt_to_zephyr(0, ssid, key_mgmt, proto, sae_pwe);
 #ifdef CONFIG_WEP
@@ -1608,8 +1666,18 @@ int supplicant_status(const struct device *dev __unused, struct net_if *iface,
 			}
 		}
 #endif
-		status->mfp = get_mfp(ssid->ieee80211w);
-		ieee80211_freq_to_chan(wpa_s->assoc_freq, &channel);
+		/*
+		 * Resolve a network without an explicit ieee80211w setting
+		 * (MGMT_FRAME_PROTECTION_DEFAULT) the same way the supplicant
+		 * does when associating.
+		 */
+		status->mfp = get_mfp(wpas_get_ssid_pmf(wpa_s, ssid));
+		if (ieee80211_freq_to_chan(wpa_s->assoc_freq, &channel) == NUM_HOSTAPD_MODES) {
+			/* The frequency is not in any known band, so the
+			 * channel was left untouched.
+			 */
+			channel = 0;
+		}
 		status->channel = channel;
 
 		if (ssid_len == 0) {
@@ -1851,21 +1919,58 @@ int supplicant_candidate_scan(const struct device *dev __unused, struct net_if *
 	char *end = pos + SUPPLICANT_CANDIDATE_SCAN_CMD_BUF_SIZE;
 	int freq = 0;
 	struct wpa_supplicant *wpa_s;
+	int cur_freq = 0;
+	bool first = true;
 
 	wpa_s = get_wpa_s_handle(iface);
 	if (!wpa_s) {
 		return -1;
 	}
 
+	/*
+	 * Include the current connected AP's frequency in the scan so that
+	 * wpa_supplicant's BSS cache has an up-to-date entry for the current
+	 * AP after the scan completes.
+	 *
+	 * Without this, wpa_supplicant_need_to_roam() (events.c) hits one of
+	 * two early-return paths that bypass need_to_roam_within_ess():
+	 *
+	 *   1. current_bss == NULL  (cache entry expired / not refreshed)
+	 *   2. selected->last_update_idx > current_bss->last_update_idx
+	 *      (candidate was seen in this scan round, current AP was not)
+	 *
+	 * Both cases cause an unconditional roam regardless of RSSI delta,
+	 * potentially associating to a much weaker AP.
+	 */
+	if (wpa_s->current_bss) {
+		cur_freq = wpa_s->current_bss->freq;
+	}
+
 	strcpy(pos, "freq=");
 	pos += 5;
+
+	/* Add current AP frequency first */
+	if (cur_freq > 0) {
+		pos += snprintf(pos, end - pos, "%d", cur_freq);
+		first = false;
+	}
+
+	/* Add neighbor report channels, skipping duplicates */
 	while (params->band_chan[i].channel) {
-		if (i > 0) {
+		freq = chan_to_freq(params->band_chan[i].channel);
+		i++;
+		if (freq <= 0) {
+			continue;
+		}
+		/* Skip if this neighbor channel is the same as current AP */
+		if (freq == cur_freq) {
+			continue;
+		}
+		if (!first) {
 			pos += snprintf(pos, end - pos, ",");
 		}
-		freq = chan_to_freq(params->band_chan[i].channel);
 		pos += snprintf(pos, end - pos, "%d", freq);
-		i++;
+		first = false;
 	}
 
 	if (!wpa_cli_cmd_v("scan %s", cmd)) {
@@ -2897,6 +3002,22 @@ static void nan_transmit_to_cmd(struct wifi_nan_params *params, char **pos, char
 	append_nan_ssi(pos, end, params->transmit.ssi, params->transmit.ssi_len);
 }
 
+static int nan_set_to_cmd(struct wifi_nan_params *params, char *cmd, size_t max_len)
+{
+	int ret;
+
+	if (params->set.param[0] == '\0' || params->set.value[0] == '\0') {
+		return -EINVAL;
+	}
+
+	ret = snprintf(cmd, max_len, "NAN_SET %s %s", params->set.param, params->set.value);
+	if (ret < 0 || (size_t)ret >= max_len) {
+		return -ENOBUFS;
+	}
+
+	return 0;
+}
+
 static int nan_params_to_cmd(struct wifi_nan_params *params, char *cmd, size_t max_len)
 {
 	char *pos = cmd;
@@ -2908,6 +3029,25 @@ static int nan_params_to_cmd(struct wifi_nan_params *params, char *cmd, size_t m
 	}
 
 	switch (params->op) {
+	case WIFI_NAN_OP_START:
+		strncpy(pos, "NAN_START", end - pos);
+		break;
+
+	case WIFI_NAN_OP_STOP:
+		strncpy(pos, "NAN_STOP", end - pos);
+		break;
+
+	case WIFI_NAN_OP_SET:
+		return nan_set_to_cmd(params, pos, end - pos);
+
+	case WIFI_NAN_OP_UPDATE_CONF:
+		strncpy(pos, "NAN_UPDATE_CONF", end - pos);
+		break;
+
+	case WIFI_NAN_OP_STATUS:
+		strncpy(pos, "NAN_STATUS", end - pos);
+		break;
+
 	case WIFI_NAN_OP_PUBLISH:
 		nan_publish_to_cmd(params, &pos, end);
 		break;
@@ -2964,6 +3104,7 @@ int supplicant_nan_cfg(const struct device *dev __unused, struct net_if *iface,
 		goto out;
 	}
 
+	memset(params->resp, 0, sizeof(params->resp));
 	if (zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn, cmd, params->resp)) {
 		ret = -ENOEXEC;
 		goto out;
@@ -3011,7 +3152,11 @@ static inline void extract_value(const char *src, char *dest, size_t dest_size)
 {
 	size_t i = 0;
 
-	while (src[i] != '\0' && src[i] != '\n' && i < dest_size - 1) {
+	if (dest_size == 0) {
+		return;
+	}
+
+	while (i < dest_size - 1 && src[i] != '\0' && src[i] != '\n') {
 		dest[i] = src[i];
 		i++;
 	}
@@ -3248,10 +3393,19 @@ int supplicant_p2p_oper(const struct device *dev __unused, struct net_if *iface,
 		const char *method_str = "";
 		char freq_str[32] = "";
 		const char *join_str = "";
+		char persistent_str[32] = "";
 
 		if (params == NULL) {
 			wpa_printf(MSG_ERROR, "P2P connect params are NULL");
 			return -EINVAL;
+		}
+
+		if ((params->connect.persistent_set)) {
+			ret = zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn,
+					"SET persistent_reconnect 1", resp_buf);
+			if (ret < 0) {
+				wpa_printf(MSG_WARNING, "Failed to set persistent_reconnect");
+			}
 		}
 
 		snprintk(addr_str, sizeof(addr_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -3268,27 +3422,33 @@ int supplicant_p2p_oper(const struct device *dev __unused, struct net_if *iface,
 			join_str = " join";
 		}
 
+		/* Add persistent parameter if specified */
+		if (params->connect.persistent_set == true) {
+			/* persistent without specific ID — wpa_supplicant picks the group */
+			snprintk(persistent_str, sizeof(persistent_str), " persistent");
+		}
+
 		switch (params->connect.method) {
 		case WIFI_P2P_METHOD_PBC:
 			method_str = "pbc";
-			snprintk(cmd_buf, sizeof(cmd_buf), "P2P_CONNECT %s %s go_intent=%d%s%s",
+			snprintk(cmd_buf, sizeof(cmd_buf), "P2P_CONNECT %s %s go_intent=%d%s%s%s",
 				 addr_str, method_str, params->connect.go_intent, freq_str,
-				 join_str);
+				 join_str, persistent_str);
 			break;
 		case WIFI_P2P_METHOD_DISPLAY:
 			method_str = "pin";
-			snprintk(cmd_buf, sizeof(cmd_buf), "P2P_CONNECT %s %s go_intent=%d%s%s",
+			snprintk(cmd_buf, sizeof(cmd_buf), "P2P_CONNECT %s %s go_intent=%d%s%s%s",
 				 addr_str, method_str, params->connect.go_intent, freq_str,
-				 join_str);
+				 join_str, persistent_str);
 			break;
 		case WIFI_P2P_METHOD_KEYPAD:
 			if (params->connect.pin[0] == '\0') {
 				wpa_printf(MSG_ERROR, "PIN required for keypad method");
 				return -EINVAL;
 			}
-			snprintk(cmd_buf, sizeof(cmd_buf), "P2P_CONNECT %s %s go_intent=%d%s%s",
+			snprintk(cmd_buf, sizeof(cmd_buf), "P2P_CONNECT %s %s go_intent=%d%s%s%s",
 				 addr_str, params->connect.pin,
-				 params->connect.go_intent, freq_str, join_str);
+				 params->connect.go_intent, freq_str, join_str, persistent_str);
 			break;
 		default:
 			wpa_printf(MSG_ERROR, "Unknown P2P connection method: %d",
@@ -3339,6 +3499,15 @@ int supplicant_p2p_oper(const struct device *dev __unused, struct net_if *iface,
 			return -EINVAL;
 		}
 
+		if ((params->group_add.persistent_set)) {
+			ret = zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn,
+					"SET persistent_reconnect 1",
+					resp_buf);
+			if (ret < 0) {
+				wpa_printf(MSG_WARNING, "Failed to set persistent_reconnect");
+			}
+		}
+
 		len = snprintk(cmd_buf, sizeof(cmd_buf), "P2P_GROUP_ADD");
 
 		if (params->group_add.freq > 0) {
@@ -3346,9 +3515,25 @@ int supplicant_p2p_oper(const struct device *dev __unused, struct net_if *iface,
 					params->group_add.freq);
 		}
 
-		if (params->group_add.persistent >= 0) {
-			len += snprintk(cmd_buf + len, sizeof(cmd_buf) - len, " persistent=%d",
-					params->group_add.persistent);
+		if (params->group_add.persistent_set == true) {
+			len += snprintk(cmd_buf + len, sizeof(cmd_buf) - len, " persistent");
+		} else if (params->group_add.persistent >= 0) {
+			/* Sanity check: verify the network exists before proceeding. */
+			char check_cmd[64];
+
+			snprintk(check_cmd, sizeof(check_cmd), "GET_NETWORK %d ssid",
+				 params->group_add.persistent);
+			ret = zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn,
+							      check_cmd, resp_buf);
+			if (ret < 0 || strncmp(resp_buf, "FAIL", 4) == 0) {
+				wpa_printf(MSG_ERROR,
+					   "P2P persistent group %d does not exist",
+					   params->group_add.persistent);
+				return -ENOENT;
+			}
+
+			len += snprintk(cmd_buf + len, sizeof(cmd_buf) - len,
+					" persistent=%d", params->group_add.persistent);
 		}
 
 		if (params->group_add.ht40 != 0) {
@@ -3473,7 +3658,7 @@ int supplicant_p2p_oper(const struct device *dev __unused, struct net_if *iface,
 	}
 
 	case WIFI_P2P_POWER_SAVE:
-		snprintk(cmd_buf, sizeof(cmd_buf), "p2p_set ps %d", params->power_save ? 1 : 0);
+		snprintk(cmd_buf, sizeof(cmd_buf), "P2P_SET ps %d", params->power_save ? 1 : 0);
 		ret = zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn, cmd_buf, resp_buf);
 		if (ret < 0) {
 			wpa_printf(MSG_ERROR, "p2p_set ps command failed: %d", ret);
@@ -3485,6 +3670,95 @@ int supplicant_p2p_oper(const struct device *dev __unused, struct net_if *iface,
 		}
 		ret = 0;
 		break;
+
+	case WIFI_P2P_LIST_NETWORKS: {
+		if (params->list_networks.buf == NULL ||
+		    params->list_networks.buf_size == 0) {
+			wpa_printf(MSG_ERROR,
+				   "P2P list_networks: buffer not provided");
+			return -EINVAL;
+		}
+
+		ret = zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn,
+						      "LIST_NETWORKS",
+						      params->list_networks.buf);
+		if (ret < 0) {
+			wpa_printf(MSG_ERROR, "LIST_NETWORKS command failed");
+			return -EIO;
+		}
+		if (strncmp(params->list_networks.buf, "FAIL", 4) == 0) {
+			wpa_printf(MSG_ERROR, "LIST_NETWORKS returned FAIL");
+			return -EIO;
+		}
+		ret = 0;
+		break;
+	}
+
+	case WIFI_P2P_PERSISTENT_REMOVE: {
+		if (params->persistent_remove.id == -1) {
+			/* Remove ALL saved networks */
+			snprintk(cmd_buf, sizeof(cmd_buf), "REMOVE_NETWORK all");
+			ret = zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn,
+							      cmd_buf, resp_buf);
+			if (ret < 0) {
+				wpa_printf(MSG_ERROR,
+					   "REMOVE_NETWORK all command failed: %d", ret);
+				return -EIO;
+			}
+			if (strncmp(resp_buf, "FAIL", 4) == 0) {
+				wpa_printf(MSG_ERROR,
+					   "REMOVE_NETWORK all returned FAIL");
+				return -EIO;
+			}
+		} else if (params->persistent_remove.id >= 0) {
+			/*
+			 * Sanity check: use GET_NETWORK <id> ssid to verify
+			 * the network exists before attempting removal.
+			 * wpa_supplicant returns "FAIL" if the ID is unknown.
+			 */
+			snprintk(cmd_buf, sizeof(cmd_buf), "GET_NETWORK %d ssid",
+				 params->persistent_remove.id);
+			ret = zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn,
+							      cmd_buf, resp_buf);
+			if (ret < 0) {
+				wpa_printf(MSG_ERROR,
+					   "GET_NETWORK %d ssid command failed: %d",
+					   params->persistent_remove.id, ret);
+				return -EIO;
+			}
+			if (strncmp(resp_buf, "FAIL", 4) == 0) {
+				wpa_printf(MSG_ERROR,
+					   "P2P persistent_remove: network ID %d not found",
+					   params->persistent_remove.id);
+				return -ENOENT;
+			}
+
+			/* Network exists, proceed with removal */
+			snprintk(cmd_buf, sizeof(cmd_buf), "REMOVE_NETWORK %d",
+				 params->persistent_remove.id);
+			ret = zephyr_wpa_cli_cmd_resp_noprint(wpa_s->ctrl_conn,
+							      cmd_buf, resp_buf);
+			if (ret < 0) {
+				wpa_printf(MSG_ERROR,
+					   "REMOVE_NETWORK %d command failed: %d",
+					   params->persistent_remove.id, ret);
+				return -EIO;
+			}
+			if (strncmp(resp_buf, "FAIL", 4) == 0) {
+				wpa_printf(MSG_ERROR,
+					   "REMOVE_NETWORK %d returned FAIL",
+					   params->persistent_remove.id);
+				return -EIO;
+			}
+		} else {
+			wpa_printf(MSG_ERROR,
+				   "P2P persistent_remove: invalid id %d",
+				   params->persistent_remove.id);
+			return -EINVAL;
+		}
+		ret = 0;
+		break;
+	}
 
 	default:
 		wpa_printf(MSG_ERROR, "Unknown P2P operation: %d", params->oper);

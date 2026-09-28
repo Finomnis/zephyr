@@ -45,6 +45,30 @@ config OPENTHREAD_SOURCES
 
 endchoice
 
+config OPENTHREAD_RADIO_VENDOR_IMPLEMENTATION
+	bool "Select vendor radio implementation"
+	depends on !NET_L2_OPENTHREAD
+	help
+	  Use a vendor-specific radio platform abstraction layer instead of the
+	  default Zephyr radio.c implementation. When enabled, the build system
+	  will compile the source file specified by
+	  OPENTHREAD_RADIO_VENDOR_IMPLEMENTATION_FILE in place of the standard
+	  OpenThread radio driver, allowing vendors to provide custom PHY-layer
+	  integration.
+
+config OPENTHREAD_RADIO_VENDOR_IMPLEMENTATION_FILE
+	string "Source file containing vendor-specific radio.c implementation"
+	default ""
+	depends on OPENTHREAD_RADIO_VENDOR_IMPLEMENTATION
+	help
+	  Name of the source file providing the vendor-specific OpenThread radio
+	  platform abstraction. This file must be placed in the
+	  modules/openthread/platform/vendor/ directory and implement the
+	  OpenThread radio API (otPlatRadio* plus platformRadioInit and
+	  platformRadioProcess functions).
+	  It will be compiled instead of the default radio.c driver
+	  during the build.
+
 config OPENTHREAD_MANUAL_START
 	bool "Start OpenThread stack manually"
 	help
@@ -171,7 +195,7 @@ config OPENTHREAD_CRYPTO_PSA
 	bool "PSA Crypto API"
 	default y
 	select PSA_CRYPTO
-	select OPENTHREAD_PLATFORM_KEY_REF if !OPENTHREAD_COPROCESSOR_RCP
+	select OPENTHREAD_PLATFORM_KEY_REF
 	imply OPENTHREAD_PLATFORM_KEYS_EXPORTABLE_ENABLE
 	help
 	  Use PSA Crypto API as backend for cryptographic operations instead
@@ -240,8 +264,7 @@ config OPENTHREAD_MBEDTLS_LIB_NAME
 config OPENTHREAD_COPROCESSOR
 	bool "OpenThread Co-Processor"
 	select OPENTHREAD_MANUAL_START
-	select RING_BUFFER
-	select UART_INTERRUPT_DRIVEN
+	select UART_INTERRUPT_DRIVEN if !OPENTHREAD_COPROCESSOR_UART_ASYNC
 	help
 	  Enable Co-Processor in OpenThread stack.
 

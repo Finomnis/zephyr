@@ -8,9 +8,12 @@
 #include <fsl_clock.h>
 #include <fsl_spc.h>
 #include <soc.h>
+#if defined(CONFIG_PM) || defined(CONFIG_POWEROFF)
+#include <fsl_vbat.h>
+#endif
 #if CONFIG_USB_DC_NXP_EHCI
-#include "usb_phy.h"
-#include "usb.h"
+#include <usb_phy.h>
+#include <usb.h>
 
 /* USB PHY configuration */
 #define BOARD_USB_PHY_D_CAL     (0x04U)
@@ -254,7 +257,7 @@ void board_early_init_hook(void)
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(enet))
 	CLOCK_AttachClk(kNONE_to_ENETRMII);
-#if defined(CONFIG_PTP_CLOCK_NXP_ENET_QOS)
+#if defined(CONFIG_PTP_CLOCK_NXP_ENET_QOS) || defined(CONFIG_PTP_CLOCK_DWC_MAC)
 	/* Attach PLL0 (150 MHz) to the ENET QoS PTP reference clock. */
 	CLOCK_AttachClk(kPLL0_to_ENETPTPREF);
 	CLOCK_SetClkDiv(kCLOCK_DivEnetptprefClk, 1u);
@@ -310,6 +313,9 @@ void board_early_init_hook(void)
 	flexspi_clock_set_freq(MCUX_FLEXSPI_CLK,
 			       DT_PROP(DT_NODELABEL(ext_flash_ctrl), spi_max_frequency));
 	enable_cache64();
+#elif CONFIG_FLASH_MCUX_FLEXSPI_NAND
+	flexspi_clock_set_freq(MCUX_FLEXSPI_CLK,
+			       DT_PROP(DT_NODELABEL(mx35lf1ge4ab), spi_max_frequency));
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(smartdma))
@@ -412,6 +418,9 @@ void board_early_init_hook(void)
 	CLOCK_SetupClockCtrl(kCLOCK_FRO12MHZ_ENA);
 #elif DT_PROP(DT_NODELABEL(lptmr0), clk_source) == 0x1
 	CLOCK_SetupClk16KClocking(kCLOCK_Clk16KToVsys);
+#if defined(CONFIG_PM) || defined(CONFIG_POWEROFF)
+	VBAT_EnableFRO16k(VBAT0, true);
+#endif
 #elif DT_PROP(DT_NODELABEL(lptmr0), clk_source) == 0x2
 	CLOCK_SetupOsc32KClocking(kCLOCK_Osc32kToVsys);
 #elif DT_PROP(DT_NODELABEL(lptmr0), clk_source) == 0x3

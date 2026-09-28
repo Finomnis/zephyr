@@ -12,6 +12,10 @@
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
 / {
+	chosen {
+		zephyr,system-timer = &lptim1;
+	};
+
 	leds {
 		compatible = "gpio-leds";
 
@@ -92,7 +96,7 @@
 	apb3-prescaler = <1>;
 };
 
-stm32_lp_tick_source: &lptim1 {
+&lptim1 {
 	clocks = <&rcc STM32_CLOCK(APB3, 11)>,
 		 <&rcc STM32_SRC_LSE LPTIM1_SEL(3)>;
 	status = "okay";
@@ -220,10 +224,13 @@ zephyr_udc0: &usbotg_fs {
 	};
 };
 
+&adc4_common {
+	st,adc-prescaler = <4>;
+	status = "okay";
+};
+
 &adc4 {
 	/* needed by vbat */
-	st,adc-clock-source = "ASYNC";
-	st,adc-prescaler = <4>;
 	status = "okay";
 };
 

@@ -40,9 +40,9 @@ config NET_NATIVE
 	bool "Native network stack support"
 	default y
 	help
-	  Enables Zephyr native IP stack. If you disable this, then
+	  Enables Zephyr native networking stack. If you disable this, then
 	  you need to enable the offloading support if you want to
-	  have IP connectivity.
+	  have connectivity.
 
 # Hidden options for enabling native IPv6/IPv4. Using these options
 # avoids having "defined(CONFIG_NET_IPV6) && defined(CONFIG_NET_NATIVE)"
@@ -154,6 +154,7 @@ config NET_QEMU_PPP
 
 config NET_QEMU_ETHERNET
 	bool "Ethernet"
+	imply ETH_DRIVER
 	imply NET_L2_ETHERNET
 	help
 	  Connect to host system via Qemu ethernet driver support. One such
@@ -184,7 +185,8 @@ config NET_QEMU_DEVICE_EXTRA_ARGS
 	default ""
 	help
 	  Extra arguments passed to the QEMU networking device.
-	  This string is appended to the QEMU "-device" option.
+	  This string is appended to the QEMU "-device" option, or to the
+	  "-nic" option for a NIC built into the emulated machine.
 	  Typically this is used to set the network MAC address of
 	  Zephyr instance. This option can contain multiple QEMU option
 	  arguments. Each QEMU argument must be separated by comma "," and no
@@ -446,11 +448,6 @@ config NET_MAX_ROUTERS
 
 source "subsys/net/ip/Kconfig.tcp"
 
-config NET_TEST_PROTOCOL
-	bool "JSON based test protocol (UDP)"
-	help
-	  Enable JSON based test protocol (UDP).
-
 config NET_UDP
 	bool "UDP"
 	default y
@@ -475,6 +472,61 @@ config NET_UDP_MISSING_CHECKSUM
 	  debugging purposes for instance. That feature is however valid only
 	  for IPv4 and on reception only, since Zephyr will always compute the
 	  UDP checksum in transmission path.
+
+config NET_UDP_OPTIONS
+	bool "UDP transport options (RFC 9868) [EXPERIMENTAL]"
+	depends on NET_UDP
+	select EXPERIMENTAL
+	help
+	  Enable support for UDP transport options as defined in
+	  RFC 9868. This allows sending and receiving UDP options
+	  in the surplus area of IP datagrams.
+
+config NET_UDP_OPTIONS_DPLPMTUD
+	bool "DPLPMTUD over UDP options (RFC 9869) [EXPERIMENTAL]"
+	depends on NET_UDP_OPTIONS
+	depends on NET_PMTU_DPLPMTUD
+	select EXPERIMENTAL
+	help
+	  Enable Datagram Packetization Layer Path MTU Discovery
+	  (RFC 8899) for plain UDP sockets using UDP options (RFC 9869).
+	  When enabled on a socket, the stack probes the path for the
+	  largest usable datagram size using the Request (REQ) and
+	  Response (RES) UDP options and reports the result via
+	  getsockopt(IP_MTU/IPV6_MTU). It also answers incoming probes by
+	  echoing the REQ token back in a RES option.
+
+config NET_UDP_OPTIONS_DPLPMTUD_PROBE_TIMEOUT_MS
+	int "UDP options DPLPMTUD probe timeout (ms)"
+	depends on NET_UDP_OPTIONS_DPLPMTUD
+	default 1000
+	help
+	  Time to wait for a probe Response (RES) before a probe is
+	  declared lost and retransmitted (RFC 8899 PROBE_TIMER). UDP has
+	  no round-trip estimate, so a fixed value is used.
+
+config NET_UDP_OPTIONS_DPLPMTUD_RAISE_TIMEOUT_MS
+	int "UDP options DPLPMTUD raise timer (ms)"
+	depends on NET_UDP_OPTIONS_DPLPMTUD
+	default 600000
+	help
+	  Once the search completes, how long to wait before probing again
+	  to detect a possible increase in the path MTU (RFC 8899
+	  PMTU_RAISE_TIMER). Default is 10 minutes.
+
+config NET_UDP_OPTIONS_DPLPMTUD_ECHO_MIN_INTERVAL_MS
+	int "UDP options DPLPMTUD minimum RES echo interval (ms)"
+	depends on NET_UDP_OPTIONS_DPLPMTUD
+	default 50
+	help
+	  Minimum time between consecutive auto-generated Response (RES)
+	  echoes on a socket acting as a DPLPMTUD responder. The stack
+	  answers a Request (REQ) by sending a RES to the datagram source
+	  address, so an off-path attacker flooding spoofed-source REQs
+	  could otherwise use the socket to reflect traffic (the RES is
+	  never larger than the REQ, so there is no amplification). This
+	  rate limit caps that reflection. Set to 0 to disable the limit,
+	  e.g. on a server that must answer many distinct probers at once.
 
 if NET_UDP
 
@@ -673,9 +725,23 @@ config NET_TEST
 	  Used for self-contained networking tests that do not require a
 	  network device.
 
+config NET_PKT_LARGE_DEFAULTS
+	bool "More networking packets by default"
+	default y if ETH_DRIVER
+	default y if NET_SLIP_TAP
+	default y if WIFI && !WIFI_USAGE_MODE_SCAN_ONLY
+	help
+	  Use larger defaults for the network packet and buffer pools.
+	  The larger defaults suit interfaces that carry full-size Ethernet
+	  frames at line rate.
+
+	  Disable this when the Ethernet L2 is enabled only for a purpose
+	  that does not move much traffic, such as a Wi-Fi driver used for
+	  scanning only, to reduce RAM usage.
+
 config NET_PKT_RX_COUNT
 	int "How many packet receives can be pending at the same time"
-	default 14 if NET_L2_ETHERNET
+	default 14 if NET_PKT_LARGE_DEFAULTS
 	default 4
 	help
 	  Each RX buffer will occupy smallish amount of memory.
@@ -683,7 +749,7 @@ config NET_PKT_RX_COUNT
 
 config NET_PKT_TX_COUNT
 	int "How many packet sends can be pending at the same time"
-	default 14 if NET_L2_ETHERNET
+	default 14 if NET_PKT_LARGE_DEFAULTS
 	default 4
 	help
 	  Each TX buffer will occupy smallish amount of memory.
@@ -691,7 +757,7 @@ config NET_PKT_TX_COUNT
 
 config NET_BUF_RX_COUNT
 	int "How many network buffers are allocated for receiving data"
-	default 36 if NET_L2_ETHERNET
+	default 36 if NET_PKT_LARGE_DEFAULTS
 	default 16
 	help
 	  Each data buffer will occupy CONFIG_NET_BUF_DATA_SIZE + smallish
@@ -699,7 +765,7 @@ config NET_BUF_RX_COUNT
 
 config NET_BUF_TX_COUNT
 	int "How many network buffers are allocated for sending data"
-	default 36 if NET_L2_ETHERNET
+	default 36 if NET_PKT_LARGE_DEFAULTS
 	default 16
 	help
 	  Each data buffer will occupy CONFIG_NET_BUF_DATA_SIZE + smallish
@@ -720,8 +786,7 @@ config NET_BUF_FIXED_DATA_SIZE
 	  as necessary to reach that request.
 
 config NET_BUF_VARIABLE_DATA_SIZE
-	bool "Variable data size buffer [EXPERIMENTAL]"
-	select EXPERIMENTAL
+	bool "Variable data size buffer"
 	help
 	  The buffer is dynamically allocated from runtime requested size.
 
@@ -736,7 +801,7 @@ config NET_BUF_DATA_SIZE
 
 config NET_PKT_BUF_RX_DATA_POOL_SIZE
 	int "Size of the RX memory pool where buffers are allocated from"
-	default 4096 if NET_L2_ETHERNET
+	default 4096 if NET_PKT_LARGE_DEFAULTS
 	default 2048
 	depends on NET_BUF_VARIABLE_DATA_SIZE
 	help
@@ -745,7 +810,7 @@ config NET_PKT_BUF_RX_DATA_POOL_SIZE
 
 config NET_PKT_BUF_TX_DATA_POOL_SIZE
 	int "Size of the TX memory pool where buffers are allocated from"
-	default 4096 if NET_L2_ETHERNET
+	default 4096 if NET_PKT_LARGE_DEFAULTS
 	default 2048
 	depends on NET_BUF_VARIABLE_DATA_SIZE
 	help

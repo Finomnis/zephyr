@@ -35,6 +35,7 @@ LOG_MODULE_REGISTER(net_if, CONFIG_NET_IF_LOG_LEVEL);
 #include <zephyr/sys/iterable_sections.h>
 
 #include "net_private.h"
+#include "../l2/ethernet/arp.h"
 #include "ipv4.h"
 #include "ipv6.h"
 #include "route_ipv4.h"
@@ -449,6 +450,8 @@ static inline void init_iface(struct net_if *iface)
 	const struct device *dev = net_if_get_device(iface);
 	const struct net_if_api *api;
 
+	NET_ASSERT(dev != NULL);
+
 	if (!device_is_ready(dev)) {
 		NET_ERR("Iface %p device not ready", iface);
 		return;
@@ -715,16 +718,33 @@ struct net_if *net_if_get_first_up(void)
 
 static enum net_l2_flags l2_flags_get(struct net_if *iface)
 {
+	const struct net_l2 *l2 = net_if_l2(iface);
 	enum net_l2_flags flags = 0;
 
-	if (net_if_l2(iface) && net_if_l2(iface)->get_flags) {
-		flags = net_if_l2(iface)->get_flags(iface);
+	if (l2 != NULL && l2->get_flags != NULL) {
+		flags = l2->get_flags(iface);
 	}
 
 	return flags;
 }
 
 #if defined(CONFIG_NET_IP)
+/* Tell the L2 that the IP level has started or stopped using a multicast
+ * address, so that the receive filter of the device can be updated.
+ */
+static int net_if_mcast_ip_addr_update(struct net_if *iface __maybe_unused,
+				       const struct net_addr *addr __maybe_unused,
+				       bool add __maybe_unused)
+{
+#if defined(CONFIG_NET_L2_ETHERNET)
+	if (net_if_l2(iface) == &NET_L2_GET_NAME(ETHERNET) ||
+	    net_eth_is_vlan_interface(iface)) {
+		return net_eth_mcast_ip_addr_update(iface, addr, add);
+	}
+#endif
+	return -ENOTSUP;
+}
+
 /* Return how many bits are shared between two IP addresses */
 static uint8_t get_ipaddr_diff(const uint8_t *src, const uint8_t *dst, int addr_len)
 {
@@ -1000,6 +1020,22 @@ out:
 	return ret;
 }
 
+static void iface_router_rm_all(struct net_if *iface, uint8_t family)
+{
+	k_mutex_lock(&lock, K_FOREVER);
+
+	ARRAY_FOR_EACH(routers, i) {
+		if (!routers[i].is_used || routers[i].iface != iface ||
+		    routers[i].address.family != family) {
+			continue;
+		}
+
+		(void)iface_router_rm(&routers[i]);
+	}
+
+	k_mutex_unlock(&lock);
+}
+
 void net_if_router_rm(struct net_if_router *router)
 {
 	k_mutex_lock(&lock, K_FOREVER);
@@ -1051,6 +1087,7 @@ static void iface_router_init(void)
 }
 #else
 #define iface_router_init(...)
+#define iface_router_rm_all(...)
 #endif /* CONFIG_NET_NATIVE_IPV4 || CONFIG_NET_NATIVE_IPV6 */
 
 #if defined(CONFIG_NET_NATIVE_IPV4) || defined(CONFIG_NET_NATIVE_IPV6)
@@ -1101,7 +1138,39 @@ void net_if_mcast_monitor(struct net_if *iface,
 #define net_if_mcast_monitor(...)
 #endif /* CONFIG_NET_NATIVE_IPV4 || CONFIG_NET_NATIVE_IPV6 */
 
+#if defined(CONFIG_NET_IPV6) || defined(CONFIG_NET_IPV4_ACD)
+/* A valid address is preferred while added and deprecated once removed. */
+static inline void ifaddr_set_valid(struct net_if_addr *ifaddr)
+{
+	ifaddr->addr_state = ifaddr->is_added ? NET_ADDR_PREFERRED :
+						NET_ADDR_DEPRECATED;
+}
+#endif /* CONFIG_NET_IPV6 || CONFIG_NET_IPV4_ACD */
+
 #if defined(CONFIG_NET_IPV6)
+/* Returns the interface owning the address with its lock held, or NULL. */
+static struct net_if *ipv6_ifaddr_iface_lock(struct net_if_addr *ifaddr)
+{
+	STRUCT_SECTION_FOREACH(net_if, iface) {
+		struct net_if_ipv6 *ipv6;
+
+		net_if_lock(iface);
+
+		ipv6 = iface->config.ip.ipv6;
+		if (ipv6 != NULL) {
+			ARRAY_FOR_EACH(ipv6->unicast, i) {
+				if (&ipv6->unicast[i] == ifaddr) {
+					return iface;
+				}
+			}
+		}
+
+		net_if_unlock(iface);
+	}
+
+	return NULL;
+}
+
 int net_if_config_ipv6_get(struct net_if *iface, struct net_if_ipv6 **ipv6)
 {
 	int ret = 0;
@@ -1149,6 +1218,104 @@ out:
 	return ret;
 }
 
+#if defined(CONFIG_NET_NATIVE_IPV6)
+static void ipv6_config_defaults_set(struct net_if_ipv6 *ipv6)
+{
+	ipv6->hop_limit = CONFIG_NET_INITIAL_HOP_LIMIT;
+	ipv6->mcast_hop_limit = CONFIG_NET_INITIAL_MCAST_HOP_LIMIT;
+	ipv6->base_reachable_time = REACHABLE_TIME;
+	ipv6->retrans_timer = 0;
+
+	net_if_ipv6_set_reachable_time(ipv6);
+
+	IF_ENABLED(CONFIG_NET_IPV6_ND, (ipv6->rs_start = 0));
+	IF_ENABLED(CONFIG_NET_IPV6_ND, (ipv6->rs_count = 0));
+	IF_ENABLED(CONFIG_NET_IPV6_IID_STABLE, (ipv6->iid = NULL));
+	IF_ENABLED(CONFIG_NET_IPV6_IID_STABLE, (ipv6->network_counter = 0));
+	IF_ENABLED(CONFIG_NET_IPV6_PE, (ipv6->desync_factor = 0));
+}
+
+static void ipv6_prefix_rm_all(struct net_if *iface, struct net_if_ipv6 *ipv6)
+{
+	ARRAY_FOR_EACH(ipv6->prefix, i) {
+		if (!ipv6->prefix[i].is_used) {
+			continue;
+		}
+
+		(void)net_if_ipv6_prefix_rm(iface, &ipv6->prefix[i].prefix,
+					    ipv6->prefix[i].len);
+
+		ipv6->prefix[i].iface = NULL;
+	}
+}
+#else
+#define ipv6_config_defaults_set(...)
+#define ipv6_prefix_rm_all(...)
+#endif /* CONFIG_NET_NATIVE_IPV6 */
+
+static void ipv6_addr_rm_all(struct net_if *iface, struct net_if_ipv6 *ipv6)
+{
+	ARRAY_FOR_EACH(ipv6->unicast, i) {
+		struct net_if_addr *ifaddr = &ipv6->unicast[i];
+		struct net_in6_addr addr;
+		int ret;
+
+		if (!ifaddr->is_used) {
+			continue;
+		}
+
+		net_ipaddr_copy(&addr, &ifaddr->address.in6_addr);
+
+		/* Drop every reference so that the slot is released even if
+		 * someone still holds one.
+		 */
+		do {
+			ret = net_if_addr_unref(iface, NET_AF_INET6, &addr, NULL);
+		} while (ret > 0);
+	}
+}
+
+static void ipv6_maddr_rm_all(struct net_if *iface, struct net_if_ipv6 *ipv6)
+{
+	ARRAY_FOR_EACH(ipv6->mcast, i) {
+		struct net_if_mcast_addr *maddr = &ipv6->mcast[i];
+		struct net_in6_addr addr;
+
+		if (maddr->is_used) {
+			net_ipaddr_copy(&addr, &maddr->address.in6_addr);
+
+			while (maddr->is_used) {
+				(void)net_if_ipv6_maddr_rm(iface, &addr);
+			}
+		}
+
+		maddr->is_joined = false;
+	}
+}
+
+/* Release everything the interface has stored in its IPv6 config. The removal
+ * is forced, any remaining references to the addresses are dropped, as the
+ * config is about to be handed back to the pool. No MLD leave is sent, the
+ * caller is expected to have taken the interface down already.
+ */
+static void ipv6_config_cleanup(struct net_if *iface, struct net_if_ipv6 *ipv6)
+{
+	net_if_stop_rs(iface);
+
+	/* Prefixes first, as removing one also removes the autoconf addresses
+	 * generated from it.
+	 */
+	ipv6_prefix_rm_all(iface, ipv6);
+	ipv6_addr_rm_all(iface, ipv6);
+	ipv6_maddr_rm_all(iface, ipv6);
+
+	iface_router_rm_all(iface, NET_AF_INET6);
+
+	net_ipv6_nbr_clear_cache(iface);
+
+	ipv6_config_defaults_set(ipv6);
+}
+
 int net_if_config_ipv6_put(struct net_if *iface)
 {
 	int ret = 0;
@@ -1161,10 +1328,20 @@ int net_if_config_ipv6_put(struct net_if *iface)
 		goto out;
 	}
 
+	if (net_if_is_admin_up(iface)) {
+		ret = -EBUSY;
+		goto out;
+	}
+
 	if (!iface->config.ip.ipv6) {
 		ret = -EALREADY;
 		goto out;
 	}
+
+	/* Return the config to the pool in a pristine state, the next
+	 * interface allocating this slot must not inherit anything from us.
+	 */
+	ipv6_config_cleanup(iface, iface->config.ip.ipv6);
 
 	k_mutex_lock(&lock, K_FOREVER);
 
@@ -1266,7 +1443,7 @@ static void leave_mcast_all(struct net_if *iface)
 			continue;
 		}
 
-		net_ipv6_mld_leave(iface, &ipv6->mcast[i].address.in6_addr);
+		net_ipv6_mld_send_leave(iface, &ipv6->mcast[i]);
 	}
 }
 
@@ -1360,6 +1537,28 @@ out:
 #if defined(CONFIG_NET_IPV6_DAD)
 #define DAD_TIMEOUT 100U /* ms */
 
+/* How many times sending the solicitation may fail before the address is given
+ * up on. The failure is a local one, a buffer or a neighbour cache entry that
+ * could not be had, so it is worth waiting out; but not forever, and never by
+ * using an address whose uniqueness was never asked about.
+ */
+#define DAD_MAX_TX_FAILURES 3U
+
+static void dad_queue(struct net_if_addr *ifaddr)
+{
+	ifaddr->dad_start = k_uptime_get_32();
+
+	k_mutex_lock(&lock, K_FOREVER);
+	sys_slist_find_and_remove(&active_dad_timers, &ifaddr->dad_node);
+	sys_slist_append(&active_dad_timers, &ifaddr->dad_node);
+	k_mutex_unlock(&lock);
+
+	/* FUTURE: use schedule, not reschedule. */
+	if (!k_work_delayable_remaining_get(&dad_timer)) {
+		k_work_reschedule(&dad_timer, K_MSEC(DAD_TIMEOUT));
+	}
+}
+
 static void dad_timeout(struct k_work *work)
 {
 	uint32_t current_time = k_uptime_get_32();
@@ -1397,15 +1596,73 @@ static void dad_timeout(struct k_work *work)
 
 	k_mutex_unlock(&lock);
 
-	SYS_SLIST_FOR_EACH_CONTAINER(&expired_list, ifaddr, dad_node) {
+	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&expired_list, ifaddr, next, dad_node) {
 		struct net_if *iface;
+
+		/* The address can be removed while its entry waits here, as
+		 * this runs without the lock and the entry has already left
+		 * active_dad_timers, which is where net_if_ipv6_addr_rm()
+		 * looks for it. Leave a freed slot alone rather than working
+		 * on it or putting it back on the timer list.
+		 */
+		if (!ifaddr->is_used) {
+			continue;
+		}
+
+		iface = net_if_get_by_index(ifaddr->ifindex);
+
+		if (ifaddr->dad_tx_failures > 0U) {
+			/* Nothing was ever asked, so nothing has answered and
+			 * the address is no more known to be unique than it was
+			 * to start with. Ask again.
+			 */
+			if (iface != NULL &&
+			    net_ipv6_start_dad(iface, ifaddr) == 0) {
+				ifaddr->dad_tx_failures = 0U;
+				dad_queue(ifaddr);
+				continue;
+			}
+
+			/* A solicitation that was built but could not be sent
+			 * leaves an entry for our own address in the
+			 * neighbour cache, and nothing reclaims an incomplete
+			 * one: only stale entries are evicted, and the reply
+			 * timer is armed only for a solicitation that has a
+			 * packet pending behind it. A failure would cost a
+			 * cache slot for good, and a cache with no slot left
+			 * is one of the two ways the send fails to begin
+			 * with.
+			 */
+			if (iface != NULL) {
+				net_ipv6_nbr_rm(iface,
+						&ifaddr->address.in6_addr);
+			}
+
+			ifaddr->dad_tx_failures++;
+
+			if (ifaddr->dad_tx_failures < DAD_MAX_TX_FAILURES) {
+				dad_queue(ifaddr);
+				continue;
+			}
+
+			NET_ERR("Cannot send DAD query for %s at interface %d, "
+				"leaving it tentative",
+				net_sprint_ipv6_addr(&ifaddr->address.in6_addr),
+				ifaddr->ifindex);
+			continue;
+		}
 
 		NET_DBG("DAD succeeded for %s at interface %d",
 			net_sprint_ipv6_addr(&ifaddr->address.in6_addr),
 			ifaddr->ifindex);
 
-		ifaddr->addr_state = NET_ADDR_PREFERRED;
-		iface = net_if_get_by_index(ifaddr->ifindex);
+		if (iface == NULL) {
+			continue;
+		}
+
+		net_if_lock(iface);
+		ifaddr_set_valid(ifaddr);
+		net_if_unlock(iface);
 
 		net_mgmt_event_notify_with_info(NET_EVENT_IPV6_DAD_SUCCEED,
 						iface,
@@ -1433,27 +1690,27 @@ void net_if_ipv6_start_dad(struct net_if *iface,
 			net_sprint_ipv6_addr(&ifaddr->address.in6_addr));
 
 		ifaddr->dad_count = 1U;
-
-		if (net_ipv6_start_dad(iface, ifaddr) != 0) {
-			NET_ERR("Interface %p failed to send DAD query for %s",
-				iface,
-				net_sprint_ipv6_addr(&ifaddr->address.in6_addr));
-		}
-
-		ifaddr->dad_start = k_uptime_get_32();
 		ifaddr->ifindex = net_if_get_by_iface(iface);
 
-		k_mutex_lock(&lock, K_FOREVER);
-		sys_slist_find_and_remove(&active_dad_timers,
-					  &ifaddr->dad_node);
-		sys_slist_append(&active_dad_timers, &ifaddr->dad_node);
-		k_mutex_unlock(&lock);
-
-		/* FUTURE: use schedule, not reschedule. */
-		if (!k_work_delayable_remaining_get(&dad_timer)) {
-			k_work_reschedule(&dad_timer,
-					  K_MSEC(DAD_TIMEOUT));
+		if (net_ipv6_start_dad(iface, ifaddr) != 0) {
+			/* Remembered rather than only logged: the timer that
+			 * fires next has to know that nothing was asked, or it
+			 * would take the silence that follows for an answer.
+			 */
+			NET_WARN("Interface %p cannot send DAD query for %s yet",
+				 iface,
+				 net_sprint_ipv6_addr(&ifaddr->address.in6_addr));
+			/* Drop the neighbour cache entry the attempt may have
+			 * left behind, as dad_timeout() does for the ones
+			 * that follow.
+			 */
+			net_ipv6_nbr_rm(iface, &ifaddr->address.in6_addr);
+			ifaddr->dad_tx_failures = 1U;
+		} else {
+			ifaddr->dad_tx_failures = 0U;
 		}
+
+		dad_queue(ifaddr);
 	} else {
 		NET_DBG("Interface %p is down, starting DAD for %s later.",
 			iface,
@@ -1741,16 +1998,40 @@ out:
 
 #endif
 
+#if defined(CONFIG_NET_IPV6)
+
+void net_if_ipv6_nbr_flush(struct net_if *iface)
+{
+	/* The neighbor cache has a lock of its own and the interface lock
+	 * cannot be taken for a NULL interface anyway, so do not take it here.
+	 */
+	net_ipv6_nbr_clear_cache(iface);
+}
+
+bool net_if_ipv6_nbr_rm(struct net_if *iface, const struct net_in6_addr *addr)
+{
+	struct net_in6_addr nbr_addr;
+
+	if (addr == NULL) {
+		return false;
+	}
+
+	/* net_ipv6_nbr_rm() still takes the address by non-const pointer. */
+	net_ipaddr_copy(&nbr_addr, addr);
+
+	return net_ipv6_nbr_rm(iface, &nbr_addr);
+}
+
+#endif /* CONFIG_NET_IPV6 */
+
 /* To be called when interface comes up so that all the non-joined multicast
  * groups are joined.
  */
 static void rejoin_ipv6_mcast_groups(struct net_if *iface)
 {
-	struct net_in6_addr solicit_addrs[NET_IF_MAX_IPV6_ADDR];
 	struct net_if_mcast_addr *ifaddr, *next;
 	struct net_if_ipv6 *ipv6;
 	sys_slist_t rejoin_needed;
-	int solicit_count = 0;
 
 	sys_slist_init(&rejoin_needed);
 
@@ -1762,24 +2043,6 @@ static void rejoin_ipv6_mcast_groups(struct net_if *iface)
 
 	if (net_if_config_ipv6_get(iface, &ipv6) < 0) {
 		goto out;
-	}
-
-	/* Collect the addresses whose solicited node multicast groups need to
-	 * be (re)joined if the interface has ND enabled. The join itself is
-	 * done below without the iface lock held: join_mcast_nodes() transmits
-	 * MLD reports, whose TX path locks other interfaces, so doing it under
-	 * net_if_lock() could deadlock (ABBA) when two interfaces are brought
-	 * up concurrently.
-	 */
-	if (!net_if_flag_is_set(iface, NET_IF_IPV6_NO_ND)) {
-		ARRAY_FOR_EACH(ipv6->unicast, i) {
-			if (!ipv6->unicast[i].is_used) {
-				continue;
-			}
-
-			solicit_addrs[solicit_count++] =
-				ipv6->unicast[i].address.in6_addr;
-		}
 	}
 
 	/* If MLD is disabled on the interface, skip rejoining. */
@@ -1800,13 +2063,6 @@ static void rejoin_ipv6_mcast_groups(struct net_if *iface)
 out:
 	net_if_unlock(iface);
 
-	/* Join the solicited node multicast groups without holding the iface
-	 * lock, see the comment above.
-	 */
-	for (int i = 0; i < solicit_count; i++) {
-		join_mcast_nodes(iface, &solicit_addrs[i]);
-	}
-
 	/* Rejoin multicast groups without holding the iface lock to avoid any
 	 * possible mutex deadlock issues.
 	 */
@@ -1814,7 +2070,7 @@ out:
 					  ifaddr, next, rejoin_node) {
 		int ret;
 
-		ret = net_ipv6_mld_rejoin(iface, &ifaddr->address.in6_addr);
+		ret = net_ipv6_mld_rejoin(iface, ifaddr);
 		if (ret < 0) {
 			NET_ERR("Cannot join mcast address %s for %d (%d)",
 				net_sprint_ipv6_addr(&ifaddr->address.in6_addr),
@@ -1863,22 +2119,15 @@ out:
 
 static void address_expired(struct net_if_addr *ifaddr)
 {
+	struct net_if *iface;
+
 	NET_DBG("IPv6 address %s is expired",
 		net_sprint_ipv6_addr(&ifaddr->address.in6_addr));
 
-	sys_slist_find_and_remove(&active_address_lifetime_timers,
-				  &ifaddr->lifetime.node);
-
-	net_timeout_set(&ifaddr->lifetime, 0, 0);
-
-	STRUCT_SECTION_FOREACH(net_if, iface) {
-		ARRAY_FOR_EACH(iface->config.ip.ipv6->unicast, i) {
-			if (&iface->config.ip.ipv6->unicast[i] == ifaddr) {
-				net_if_ipv6_addr_rm(iface,
-					&iface->config.ip.ipv6->unicast[i].address.in6_addr);
-				return;
-			}
-		}
+	iface = ipv6_ifaddr_iface_lock(ifaddr);
+	if (iface != NULL) {
+		net_if_ipv6_addr_rm(iface, &ifaddr->address.in6_addr);
+		net_if_unlock(iface);
 	}
 }
 
@@ -1887,8 +2136,11 @@ static void address_lifetime_timeout(struct k_work *work)
 	uint32_t next_update = UINT32_MAX;
 	uint32_t current_time = k_uptime_get_32();
 	struct net_if_addr *current, *next;
+	sys_slist_t expired_list;
 
 	ARG_UNUSED(work);
+
+	sys_slist_init(&expired_list);
 
 	k_mutex_lock(&lock, K_FOREVER);
 
@@ -1899,7 +2151,12 @@ static void address_lifetime_timeout(struct k_work *work)
 							     current_time);
 
 		if (this_update == 0U) {
-			address_expired(current);
+			sys_slist_find_and_remove(
+				&active_address_lifetime_timers,
+				&current->lifetime.node);
+			net_timeout_set(&current->lifetime, 0, 0);
+			sys_slist_append(&expired_list,
+					 &current->lifetime.node);
 			continue;
 		}
 
@@ -1919,6 +2176,15 @@ static void address_lifetime_timeout(struct k_work *work)
 	}
 
 	k_mutex_unlock(&lock);
+
+	/* address_expired() calls net_if_ipv6_addr_rm(), which takes the
+	 * interface lock. That lock is acquired before this one elsewhere, so
+	 * the removals must happen with this lock released.
+	 */
+	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&expired_list, current, next,
+					  lifetime.node) {
+		address_expired(current);
+	}
 }
 
 #if defined(CONFIG_NET_TEST)
@@ -1980,8 +2246,16 @@ struct net_if_addr *net_if_ipv6_addr_lookup_raw(const uint8_t *addr,
 				}
 
 				ifaddr = &ipv6->unicast[i];
-				net_if_unlock(iface);
-				goto out;
+
+				/* If the interface is up, return the result immediately.
+				 * Otherwise, keep searching and return the result only after
+				 * checking there's no other interface that is up with given
+				 * address.
+				 */
+				if (net_if_is_up(iface)) {
+					net_if_unlock(iface);
+					goto out;
+				}
 			}
 		}
 
@@ -2064,20 +2338,39 @@ static inline int z_vrfy_net_if_ipv6_addr_lookup_by_index(
 #include <zephyr/syscalls/net_if_ipv6_addr_lookup_by_index_mrsh.c>
 #endif
 
-void net_if_ipv6_addr_update_lifetime(struct net_if_addr *ifaddr,
-				      uint32_t vlifetime)
+void net_if_ipv6_addr_update_lifetime_locked(struct net_if_addr *ifaddr,
+					     uint32_t vlifetime)
 {
+	/* Lock order: interface lock, then the global lock. */
 	k_mutex_lock(&lock, K_FOREVER);
 
 	NET_DBG("Updating expire time of %s by %u secs",
 		net_sprint_ipv6_addr(&ifaddr->address.in6_addr),
 		vlifetime);
 
-	ifaddr->addr_state = NET_ADDR_PREFERRED;
+	/* An address in DAD stays tentative until DAD completes. */
+	if (ifaddr->addr_state != NET_ADDR_TENTATIVE) {
+		ifaddr_set_valid(ifaddr);
+	}
 
 	address_start_timer(ifaddr, vlifetime);
 
 	k_mutex_unlock(&lock);
+}
+
+void net_if_ipv6_addr_update_lifetime(struct net_if_addr *ifaddr,
+				      uint32_t vlifetime)
+{
+	struct net_if *iface;
+
+	iface = ipv6_ifaddr_iface_lock(ifaddr);
+	if (iface == NULL) {
+		return;
+	}
+
+	net_if_ipv6_addr_update_lifetime_locked(ifaddr, vlifetime);
+
+	net_if_unlock(iface);
 }
 
 static struct net_if_addr *ipv6_addr_find(struct net_if *iface,
@@ -2123,7 +2416,7 @@ static inline void net_if_addr_init(struct net_if_addr *ifaddr,
 			net_sprint_ipv6_addr(addr),
 			vlifetime);
 
-		net_if_ipv6_addr_update_lifetime(ifaddr, vlifetime);
+		net_if_ipv6_addr_update_lifetime_locked(ifaddr, vlifetime);
 	} else {
 		ifaddr->is_infinite = true;
 	}
@@ -2156,6 +2449,12 @@ struct net_if_addr *net_if_ipv6_addr_add(struct net_if *iface,
 		if (!ifaddr->is_added) {
 			atomic_inc(&ifaddr->atomic_ref);
 			ifaddr->is_added = true;
+			/* Undo the demotion done on removal. An address still
+			 * in DAD stays tentative until DAD completes.
+			 */
+			if (ifaddr->addr_state == NET_ADDR_DEPRECATED) {
+				ifaddr->addr_state = NET_ADDR_PREFERRED;
+			}
 		}
 
 		goto out;
@@ -2255,12 +2554,30 @@ bool net_if_ipv6_addr_rm(struct net_if *iface, const struct net_in6_addr *addr)
 		goto out;
 	}
 
+	ifaddr = ipv6_addr_find(iface, addr);
+	if (ifaddr != NULL && !ifaddr->is_added) {
+		/* The remaining references belong to the users of the
+		 * address, only they may release them.
+		 */
+		NET_DBG("Address %s already removed",
+			net_sprint_ipv6_addr(addr));
+		result = false;
+		goto out;
+	}
+
 	ret = net_if_addr_unref(iface, NET_AF_INET6, addr, &ifaddr);
 	if (ret > 0) {
 		NET_DBG("Address %s still in use (ref %d)",
 			net_sprint_ipv6_addr(addr), ret);
 		result = false;
 		ifaddr->is_added = false;
+		/* Existing users keep the address, source selection picks
+		 * it only as a last resort. An address still in DAD stays
+		 * tentative until DAD completes.
+		 */
+		if (ifaddr->addr_state == NET_ADDR_PREFERRED) {
+			ifaddr->addr_state = NET_ADDR_DEPRECATED;
+		}
 		goto out;
 	} else if (ret < 0) {
 		NET_DBG("Address %s not found (%d)",
@@ -2382,20 +2699,21 @@ struct net_if_mcast_addr *net_if_ipv6_maddr_add(struct net_if *iface,
 {
 	struct net_if_mcast_addr *ifmaddr = NULL;
 	struct net_if_ipv6 *ipv6;
+	int ret;
 
 	if (iface == NULL || addr == NULL) {
+		return NULL;
+	}
+
+	if (!net_ipv6_is_addr_mcast(addr)) {
+		NET_DBG("Address %s is not a multicast address.",
+			net_sprint_ipv6_addr(addr));
 		return NULL;
 	}
 
 	net_if_lock(iface);
 
 	if (net_if_config_ipv6_get(iface, &ipv6) < 0) {
-		goto out;
-	}
-
-	if (!net_ipv6_is_addr_mcast(addr)) {
-		NET_DBG("Address %s is not a multicast address.",
-			net_sprint_ipv6_addr(addr));
 		goto out;
 	}
 
@@ -2418,6 +2736,15 @@ struct net_if_mcast_addr *net_if_ipv6_maddr_add(struct net_if *iface,
 		net_if_maddr_ref_init(&ipv6->mcast[i]);
 
 		memcpy(&ipv6->mcast[i].address.in6_addr, addr, 16);
+
+		ret = net_if_mcast_ip_addr_update(iface, &ipv6->mcast[i].address, true);
+		if ((ret < 0) && (ret != -ENOTSUP)) {
+			NET_DBG("Failed to add multicast address %s to iface %d (%p)",
+				net_sprint_ipv6_addr(addr), net_if_get_by_iface(iface),
+				iface);
+			ipv6->mcast[i].is_used = false;
+			goto out;
+		}
 
 		NET_DBG("[%zu] interface %d (%p) address %s added", i,
 			net_if_get_by_iface(iface), iface,
@@ -2479,6 +2806,8 @@ bool net_if_ipv6_maddr_rm(struct net_if *iface, const struct net_in6_addr *addr)
 		}
 
 		ipv6->mcast[i].is_used = false;
+
+		(void)net_if_mcast_ip_addr_update(iface, &ipv6->mcast[i].address, false);
 
 		NET_DBG("[%zu] interface %d (%p) address %s removed",
 			i, net_if_get_by_iface(iface), iface,
@@ -3181,6 +3510,129 @@ void net_if_ipv6_prefix_unset_timer(struct net_if_ipv6_prefix *prefix)
 	prefix_timer_remove(prefix);
 }
 
+#if defined(CONFIG_NET_IPV6_ND_RA_TX)
+int net_if_ipv6_prefix_set_advertise(struct net_if *iface,
+				     const struct net_in6_addr *prefix,
+				     uint8_t len, bool advertise)
+{
+	struct net_if_ipv6_prefix *ifprefix;
+	bool send_ra = false;
+	int ret = -ENOENT;
+
+	net_if_lock(iface);
+
+	ifprefix = net_if_ipv6_prefix_lookup(iface, prefix, len);
+	if (ifprefix == NULL) {
+		goto out;
+	}
+
+	ifprefix->is_advertised = advertise;
+	ret = 0;
+
+	send_ra = advertise && iface->config.ip.ipv6 != NULL &&
+		  iface->config.ip.ipv6->is_router && net_if_is_up(iface);
+
+out:
+	net_if_unlock(iface);
+
+	/* Send an advertisement immediately so that downstream hosts pick up
+	 * the change without waiting for the periodic timer. This is done
+	 * without holding net_if_lock() as the TX path may need to take the
+	 * lock of another interface (ABBA).
+	 */
+	if (send_ra) {
+		(void)net_ipv6_send_ra(iface, NULL);
+	}
+
+	return ret;
+}
+
+int net_if_ipv6_router_start(struct net_if *iface)
+{
+	struct net_in6_addr all_routers;
+	struct net_if_ipv6 *ipv6;
+	bool iface_up;
+	int ret = 0;
+
+	net_if_lock(iface);
+
+	ipv6 = iface->config.ip.ipv6;
+	if (ipv6 == NULL) {
+		net_if_unlock(iface);
+		return -ENOTSUP;
+	}
+
+	ipv6->is_router = true;
+	iface_up = net_if_is_up(iface);
+
+	net_if_unlock(iface);
+
+	net_ipv6_ra_update_timer();
+
+	/* Join the all-routers multicast group (ff02::2) so that the interface
+	 * receives Router Solicitations from downstream hosts and can answer
+	 * them with a Router Advertisement (RFC 4861 ch. 2.2 and 6.2.6).
+	 *
+	 * This is done without holding net_if_lock(): net_ipv6_mld_join()
+	 * transmits an MLD report whose TX path locks other interfaces, so
+	 * joining under the lock could deadlock (ABBA). net_ipv6_mld_join() is
+	 * idempotent, so no explicit "already joined" check is needed.
+	 */
+	net_ipv6_addr_create_ll_allrouters_mcast(&all_routers);
+	ret = net_ipv6_mld_join(iface, &all_routers);
+	if (ret == -ENOTSUP) {
+		/* MLD compiled out: still register the address locally so that
+		 * solicitations to it are accepted.
+		 */
+		(void)net_if_ipv6_maddr_add(iface, &all_routers);
+		ret = 0;
+	} else if (ret < 0 && ret != -ENETDOWN) {
+		NET_ERR("Cannot join all routers address for %d (%d)",
+			net_if_get_by_iface(iface), ret);
+	} else {
+		ret = 0;
+	}
+
+	if (iface_up) {
+		(void)net_ipv6_send_ra(iface, NULL);
+	}
+
+	return ret;
+}
+
+int net_if_ipv6_router_stop(struct net_if *iface)
+{
+	struct net_in6_addr all_routers;
+	struct net_if_ipv6 *ipv6;
+
+	net_if_lock(iface);
+
+	ipv6 = iface->config.ip.ipv6;
+	if (ipv6 == NULL) {
+		net_if_unlock(iface);
+		return -ENOTSUP;
+	}
+
+	ipv6->is_router = false;
+	ipv6->ra_pending_at = 0;
+
+	net_if_unlock(iface);
+
+	net_ipv6_ra_update_timer();
+
+	/* Leave the all-routers multicast group joined in router_start().
+	 * Done without net_if_lock() held for the same ABBA reason as the join
+	 * above (net_ipv6_mld_leave() transmits an MLD report).
+	 */
+	net_ipv6_addr_create_ll_allrouters_mcast(&all_routers);
+	if (net_ipv6_mld_leave(iface, &all_routers) == -ENOTSUP) {
+		(void)net_if_ipv6_maddr_rm(iface, &all_routers);
+	}
+
+	return 0;
+}
+#endif /* CONFIG_NET_IPV6_ND_RA_TX */
+
 struct net_if_router *net_if_ipv6_router_lookup(struct net_if *iface,
 						const struct net_in6_addr *addr)
 {
@@ -3352,6 +3804,10 @@ static struct net_in6_addr *net_if_ipv6_get_best_match(struct net_if *iface,
 	struct net_in6_addr *temp_addr = NULL;
 	uint8_t len, temp_addr_len = 0;
 	bool ret;
+
+	if (!net_if_is_up(iface)) {
+		return src;
+	}
 
 	net_if_lock(iface);
 
@@ -3665,17 +4121,32 @@ struct net_if *net_if_ipv6_select_src_iface(const struct net_in6_addr *dst)
 uint32_t net_if_ipv6_calc_reachable_time(struct net_if_ipv6 *ipv6)
 {
 	uint32_t min_reachable, max_reachable;
+	uint32_t spread;
+
+	if (ipv6->base_reachable_time == 0U) {
+		return REACHABLE_TIME;
+	}
 
 	min_reachable = (MIN_RANDOM_NUMER * ipv6->base_reachable_time)
 			/ MIN_RANDOM_DENOM;
 	max_reachable = (MAX_RANDOM_NUMER * ipv6->base_reachable_time)
 			/ MAX_RANDOM_DENOM;
 
+	/* RFC 4861 uses MIN_RANDOM_FACTOR (1/2); round up so the range is never 0 ms */
+	if (min_reachable == 0U) {
+		min_reachable = 1U;
+	}
+
 	NET_DBG("min_reachable:%u max_reachable:%u", min_reachable,
 		max_reachable);
 
-	return min_reachable +
-	       sys_rand32_get() % (max_reachable - min_reachable);
+	if (max_reachable <= min_reachable) {
+		return min_reachable;
+	}
+
+	spread = max_reachable - min_reachable;
+
+	return min_reachable + sys_rand32_get() % spread;
 }
 
 static void iface_ipv6_start(struct net_if *iface)
@@ -3736,6 +4207,11 @@ static void iface_ipv6_stop(struct net_if *iface)
 	}
 
 	net_if_unlock(iface);
+
+	/* Drop cached neighbor entries: their reachability is no longer valid
+	 * once the link is down, so they are re-resolved when it comes back.
+	 */
+	net_ipv6_nbr_clear_cache(iface);
 }
 
 static void iface_ipv6_init(int if_count)
@@ -3756,11 +4232,7 @@ static void iface_ipv6_init(int if_count)
 	}
 
 	ARRAY_FOR_EACH(ipv6_addresses, i) {
-		ipv6_addresses[i].ipv6.hop_limit = CONFIG_NET_INITIAL_HOP_LIMIT;
-		ipv6_addresses[i].ipv6.mcast_hop_limit = CONFIG_NET_INITIAL_MCAST_HOP_LIMIT;
-		ipv6_addresses[i].ipv6.base_reachable_time = REACHABLE_TIME;
-
-		net_if_ipv6_set_reachable_time(&ipv6_addresses[i].ipv6);
+		ipv6_config_defaults_set(&ipv6_addresses[i].ipv6);
 	}
 }
 #endif /* CONFIG_NET_NATIVE_IPV6 */
@@ -3849,6 +4321,77 @@ out:
 	return ret;
 }
 
+#if defined(CONFIG_NET_NATIVE_IPV4)
+static void ipv4_config_defaults_set(struct net_if_ipv4 *ipv4)
+{
+	ipv4->ttl = CONFIG_NET_INITIAL_TTL;
+	ipv4->mcast_ttl = CONFIG_NET_INITIAL_MCAST_TTL;
+
+	IF_ENABLED(CONFIG_NET_IPV4_ACD, (ipv4->conflict_cnt = 0));
+}
+#else
+#define ipv4_config_defaults_set(...)
+#endif /* CONFIG_NET_NATIVE_IPV4 */
+
+static void ipv4_addr_rm_all(struct net_if *iface, struct net_if_ipv4 *ipv4)
+{
+	ARRAY_FOR_EACH(ipv4->unicast, i) {
+		struct net_if_addr *ifaddr = &ipv4->unicast[i].ipv4;
+		struct net_in_addr addr;
+		int ret;
+
+		if (!ifaddr->is_used) {
+			continue;
+		}
+
+		net_ipaddr_copy(&addr, &ifaddr->address.in_addr);
+
+		/* Drop every reference so that the slot is released even if
+		 * someone still holds one.
+		 */
+		do {
+			ret = net_if_addr_unref(iface, NET_AF_INET, &addr, NULL);
+		} while (ret > 0);
+
+		ipv4->unicast[i].netmask.s_addr = 0;
+	}
+}
+
+static void ipv4_maddr_rm_all(struct net_if *iface, struct net_if_ipv4 *ipv4)
+{
+	ARRAY_FOR_EACH(ipv4->mcast, i) {
+		struct net_if_mcast_addr *maddr = &ipv4->mcast[i];
+		struct net_in_addr addr;
+
+		if (maddr->is_used) {
+			net_ipaddr_copy(&addr, &maddr->address.in_addr);
+
+			while (maddr->is_used) {
+				(void)net_if_ipv4_maddr_rm(iface, &addr);
+			}
+		}
+
+		maddr->is_joined = false;
+	}
+}
+
+/* Release everything the interface has stored in its IPv4 config. The removal
+ * is forced, any remaining references to the addresses are dropped, as the
+ * config is about to be handed back to the pool. No IGMP leave is sent, the
+ * caller is expected to have taken the interface down already.
+ */
+static void ipv4_config_cleanup(struct net_if *iface, struct net_if_ipv4 *ipv4)
+{
+	ipv4_addr_rm_all(iface, ipv4);
+	ipv4_maddr_rm_all(iface, ipv4);
+
+	iface_router_rm_all(iface, NET_AF_INET);
+
+	ipv4->gw.s_addr = 0;
+
+	ipv4_config_defaults_set(ipv4);
+}
+
 int net_if_config_ipv4_put(struct net_if *iface)
 {
 	int ret = 0;
@@ -3860,10 +4403,20 @@ int net_if_config_ipv4_put(struct net_if *iface)
 		goto out;
 	}
 
+	if (net_if_is_admin_up(iface)) {
+		ret = -EBUSY;
+		goto out;
+	}
+
 	if (!iface->config.ip.ipv4) {
 		ret = -EALREADY;
 		goto out;
 	}
+
+	/* Return the config to the pool in a pristine state, the next
+	 * interface allocating this slot must not inherit anything from us.
+	 */
+	ipv4_config_cleanup(iface, iface->config.ip.ipv4);
 
 	k_mutex_lock(&lock, K_FOREVER);
 
@@ -3893,14 +4446,10 @@ bool net_if_ipv4_addr_onlink(struct net_if **iface, const struct net_in_addr *ad
 	struct net_if *best_iface = NULL;
 	uint8_t best_len = 0U;
 
-	if (iface == NULL || *iface == NULL) {
-		return false;
-	}
-
 	STRUCT_SECTION_FOREACH(net_if, tmp) {
 		struct net_if_ipv4 *ipv4;
 
-		if (*iface != tmp) {
+		if (iface != NULL && *iface != NULL && *iface != tmp) {
 			continue;
 		}
 
@@ -3942,7 +4491,10 @@ bool net_if_ipv4_addr_onlink(struct net_if **iface, const struct net_in_addr *ad
 	}
 
 	if (best_iface != NULL) {
-		*iface = best_iface;
+		if (iface != NULL) {
+			*iface = best_iface;
+		}
+
 		return true;
 	}
 
@@ -4131,6 +4683,10 @@ static struct net_in_addr *net_if_ipv4_get_best_match(struct net_if *iface,
 	struct net_if_ipv4 *ipv4;
 	struct net_in_addr *src = NULL;
 	uint8_t len;
+
+	if (!net_if_is_up(iface)) {
+		return src;
+	}
 
 	net_if_lock(iface);
 
@@ -4391,8 +4947,16 @@ struct net_if_addr *net_if_ipv4_addr_lookup_raw(const uint8_t *addr,
 				}
 
 				ifaddr = &ipv4->unicast[i].ipv4;
-				net_if_unlock(iface);
-				goto out;
+
+				/* If the interface is up, return the result immediately.
+				 * Otherwise, keep searching and return the result only after
+				 * checking there's no other interface that is up with given
+				 * address.
+				 */
+				if (net_if_is_up(iface)) {
+					net_if_unlock(iface);
+					goto out;
+				}
 			}
 		}
 
@@ -4407,6 +4971,44 @@ struct net_if_addr *net_if_ipv4_addr_lookup(const struct net_in_addr *addr,
 					    struct net_if **ret)
 {
 	return net_if_ipv4_addr_lookup_raw(addr->s4_addr, ret);
+}
+
+struct net_if_addr *net_if_ipv4_addr_lookup_by_iface_raw(struct net_if *iface,
+							 const uint8_t *addr)
+{
+	struct net_if_addr *ifaddr = NULL;
+	struct net_if_ipv4 *ipv4;
+
+	net_if_lock(iface);
+
+	ipv4 = iface->config.ip.ipv4;
+	if (ipv4 == NULL) {
+		goto out;
+	}
+
+	ARRAY_FOR_EACH(ipv4->unicast, i) {
+		if (!ipv4->unicast[i].ipv4.is_used ||
+		    ipv4->unicast[i].ipv4.address.family != NET_AF_INET) {
+			continue;
+		}
+
+		if (UNALIGNED_GET((uint32_t *)addr) ==
+		    ipv4->unicast[i].ipv4.address.in_addr.s_addr) {
+			ifaddr = &ipv4->unicast[i].ipv4;
+			goto out;
+		}
+	}
+
+out:
+	net_if_unlock(iface);
+
+	return ifaddr;
+}
+
+struct net_if_addr *net_if_ipv4_addr_lookup_by_iface(struct net_if *iface,
+						     const struct net_in_addr *addr)
+{
+	return net_if_ipv4_addr_lookup_by_iface_raw(iface, addr->s4_addr);
 }
 
 int z_impl_net_if_ipv4_addr_lookup_by_index(const struct net_in_addr *addr)
@@ -4660,7 +5262,7 @@ void net_if_ipv4_acd_succeeded(struct net_if *iface, struct net_if_addr *ifaddr)
 		net_sprint_ipv4_addr(&ifaddr->address.in_addr),
 		ifaddr->ifindex);
 
-	ifaddr->addr_state = NET_ADDR_PREFERRED;
+	ifaddr_set_valid(ifaddr);
 
 	net_mgmt_event_notify_with_info(NET_EVENT_IPV4_ACD_SUCCEED, iface,
 					&ifaddr->address.in_addr,
@@ -4811,6 +5413,12 @@ struct net_if_addr *net_if_ipv4_addr_add(struct net_if *iface,
 		if (!ifaddr->is_added) {
 			atomic_inc(&ifaddr->atomic_ref);
 			ifaddr->is_added = true;
+			/* Undo the demotion done on removal. An address still
+			 * in ACD stays tentative until ACD completes.
+			 */
+			if (ifaddr->addr_state == NET_ADDR_DEPRECATED) {
+				ifaddr->addr_state = NET_ADDR_PREFERRED;
+			}
 		}
 
 		goto out;
@@ -4924,12 +5532,30 @@ bool net_if_ipv4_addr_rm(struct net_if *iface, const struct net_in_addr *addr)
 		goto out;
 	}
 
+	ifaddr = ipv4_addr_find(iface, addr);
+	if (ifaddr != NULL && !ifaddr->is_added) {
+		/* The remaining references belong to the users of the
+		 * address, only they may release them.
+		 */
+		NET_DBG("Address %s already removed",
+			net_sprint_ipv4_addr(addr));
+		result = false;
+		goto out;
+	}
+
 	ret = net_if_addr_unref(iface, NET_AF_INET, addr, &ifaddr);
 	if (ret > 0) {
 		NET_DBG("Address %s still in use (ref %d)",
 			net_sprint_ipv4_addr(addr), ret);
 		result = false;
 		ifaddr->is_added = false;
+		/* Existing users keep the address, it is no longer offered
+		 * as a source for new connections. An address still in ACD
+		 * stays tentative until ACD completes.
+		 */
+		if (ifaddr->addr_state == NET_ADDR_PREFERRED) {
+			ifaddr->addr_state = NET_ADDR_DEPRECATED;
+		}
 		goto out;
 	} else if (ret < 0) {
 		NET_DBG("Address %s not found (%d)",
@@ -5079,20 +5705,21 @@ struct net_if_mcast_addr *net_if_ipv4_maddr_add(struct net_if *iface,
 						const struct net_in_addr *addr)
 {
 	struct net_if_mcast_addr *maddr = NULL;
+	int ret;
 
 	if (iface == NULL || addr == NULL) {
+		return NULL;
+	}
+
+	if (!net_ipv4_is_addr_mcast(addr)) {
+		NET_DBG("Address %s is not a multicast address.",
+			net_sprint_ipv4_addr(addr));
 		return NULL;
 	}
 
 	net_if_lock(iface);
 
 	if (net_if_config_ipv4_get(iface, NULL) < 0) {
-		goto out;
-	}
-
-	if (!net_ipv4_is_addr_mcast(addr)) {
-		NET_DBG("Address %s is not a multicast address.",
-			net_sprint_ipv4_addr(addr));
 		goto out;
 	}
 
@@ -5113,6 +5740,16 @@ struct net_if_mcast_addr *net_if_ipv4_maddr_add(struct net_if *iface,
 #if defined(CONFIG_NET_IPV4_IGMPV3)
 		maddr->sources_len = 0;
 #endif
+		ret = net_if_mcast_ip_addr_update(iface, &maddr->address, true);
+		if ((ret < 0) && (ret != -ENOTSUP)) {
+			NET_DBG("Failed to add multicast address %s to iface %d (%p)",
+				net_sprint_ipv4_addr(addr), net_if_get_by_iface(iface),
+				iface);
+			maddr->is_used = false;
+			maddr = NULL;
+			goto out;
+		}
+
 		net_if_maddr_ref_init(maddr);
 
 		NET_DBG("interface %d (%p) address %s added",
@@ -5162,6 +5799,8 @@ bool net_if_ipv4_maddr_rm(struct net_if *iface, const struct net_in_addr *addr)
 	}
 
 	maddr->is_used = false;
+
+	(void)net_if_mcast_ip_addr_update(iface, &maddr->address, false);
 
 	NET_DBG("interface %d (%p) address %s removed",
 		net_if_get_by_iface(iface), iface, net_sprint_ipv4_addr(addr));
@@ -5256,6 +5895,27 @@ void net_if_ipv4_maddr_join(struct net_if *iface, struct net_if_mcast_addr *addr
 	addr->is_joined = true;
 	net_if_unlock(iface);
 }
+
+#if defined(CONFIG_NET_IPV4)
+
+void net_if_ipv4_nbr_flush(struct net_if *iface)
+{
+	/* The ARP cache has a lock of its own and the interface lock cannot be
+	 * taken for a NULL interface anyway, so do not take it here.
+	 */
+	net_arp_clear_cache(iface);
+}
+
+bool net_if_ipv4_nbr_rm(struct net_if *iface, const struct net_in_addr *addr)
+{
+	if (addr == NULL) {
+		return false;
+	}
+
+	return net_arp_entry_rm(iface, addr);
+}
+
+#endif /* CONFIG_NET_IPV4 */
 
 #if defined(CONFIG_NET_NATIVE_IPV4)
 uint8_t net_if_ipv4_get_ttl(struct net_if *iface)
@@ -5359,6 +6019,26 @@ bool net_if_ipv4_router_rm(struct net_if_router *router)
 	return iface_router_rm(router);
 }
 
+int net_if_ipv4_route_add(struct net_if *iface, const struct net_in_addr *addr, uint8_t mask_len,
+			  const struct net_in_addr *nexthop, uint32_t lifetime)
+{
+#if defined(CONFIG_NET_IPV4_ROUTE)
+	struct net_route_entry *route;
+
+	route = net_route_ipv4_add(iface, (struct net_in_addr *)addr, mask_len,
+				   (struct net_in_addr *)nexthop, lifetime, 0);
+
+	return route == NULL ? -ENOMEM : 0;
+#else
+	ARG_UNUSED(iface);
+	ARG_UNUSED(addr);
+	ARG_UNUSED(mask_len);
+	ARG_UNUSED(nexthop);
+	ARG_UNUSED(lifetime);
+
+	return -ENOTSUP;
+#endif
+}
 
 static void iface_ipv4_init(int if_count)
 {
@@ -5373,8 +6053,7 @@ static void iface_ipv4_init(int if_count)
 	}
 
 	for (i = 0; i < ARRAY_SIZE(ipv4_addresses); i++) {
-		ipv4_addresses[i].ipv4.ttl = CONFIG_NET_INITIAL_TTL;
-		ipv4_addresses[i].ipv4.mcast_ttl = CONFIG_NET_INITIAL_MCAST_TTL;
+		ipv4_config_defaults_set(&ipv4_addresses[i].ipv4);
 	}
 }
 
@@ -5392,7 +6071,7 @@ static void leave_ipv4_mcast_all(struct net_if *iface)
 			continue;
 		}
 
-		net_ipv4_igmp_leave(iface, &ipv4->mcast[i].address.in_addr);
+		net_ipv4_igmp_send_leave(iface, &ipv4->mcast[i]);
 	}
 }
 
@@ -5443,7 +6122,7 @@ static void rejoin_ipv4_mcast_groups(struct net_if *iface)
 	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&rejoin_needed, ifaddr, next, rejoin_node) {
 		int ret;
 
-		ret = net_ipv4_igmp_rejoin(iface, &ifaddr->address.in_addr);
+		ret = net_ipv4_igmp_rejoin(iface, ifaddr);
 		if (ret < 0) {
 			NET_ERR("Cannot join mcast address %s for %d (%d)",
 				net_sprint_ipv4_addr(&ifaddr->address.in_addr),
@@ -5681,14 +6360,20 @@ static void remove_ipv6_ifaddr(struct net_if *iface,
 #if defined(CONFIG_NET_IPV6_DAD)
 	if (!net_if_flag_is_set(iface, NET_IF_IPV6_NO_ND)) {
 		k_mutex_lock(&lock, K_FOREVER);
-		if (sys_slist_find_and_remove(&active_dad_timers,
-					      &ifaddr->dad_node)) {
-			/* Address with active DAD timer would still have
-			 * stale entry in the neighbor cache.
-			 */
+		(void)sys_slist_find_and_remove(&active_dad_timers,
+						&ifaddr->dad_node);
+		k_mutex_unlock(&lock);
+
+		/* A tentative address still has the entry for itself that
+		 * the DAD solicitation left in the neighbour cache, so
+		 * remove it here. The address state is checked rather than
+		 * membership of active_dad_timers, because dad_timeout()
+		 * unlinks the address from that list before it processes it
+		 * with the lock released.
+		 */
+		if (ifaddr->addr_state == NET_ADDR_TENTATIVE) {
 			net_ipv6_nbr_rm(iface, &ifaddr->address.in6_addr);
 		}
-		k_mutex_unlock(&lock);
 	}
 #endif
 
@@ -5882,6 +6567,10 @@ int net_if_addr_unref(struct net_if *iface,
 
 enum net_verdict net_if_recv_data(struct net_if *iface, struct net_pkt *pkt)
 {
+	const struct net_l2 *l2 = net_if_l2(iface);
+
+	NET_ASSERT(l2 != NULL);
+
 	if (IS_ENABLED(CONFIG_NET_PROMISCUOUS_MODE) &&
 	    net_if_is_promisc(iface)) {
 		struct net_pkt *new_pkt;
@@ -5893,7 +6582,7 @@ enum net_verdict net_if_recv_data(struct net_if *iface, struct net_pkt *pkt)
 		}
 	}
 
-	return net_if_l2(iface)->recv(iface, pkt);
+	return l2->recv(iface, pkt);
 }
 
 void net_if_register_link_cb(struct net_if_link_cb *link,
@@ -6035,7 +6724,8 @@ static void notify_iface_up(struct net_if *iface)
 		/* CAN does not require link address. */
 	} else {
 		if (!net_if_is_offloaded(iface)) {
-			NET_ASSERT(net_if_get_link_addr(iface)->len > 0);
+			NET_ASSERT(net_if_get_link_addr(iface) != NULL &&
+				   net_if_get_link_addr(iface)->len > 0);
 		}
 	}
 
@@ -6129,11 +6819,6 @@ static void update_operational_state(struct net_if *iface)
 		goto exit;
 	}
 
-	if (!device_is_ready(net_if_get_device(iface))) {
-		new_state = NET_IF_OPER_LOWERLAYERDOWN;
-		goto exit;
-	}
-
 	if (!net_if_is_carrier_ok(iface)) {
 #if defined(CONFIG_NET_L2_VIRTUAL)
 		if (net_if_l2(iface) == &NET_L2_GET_NAME(VIRTUAL)) {
@@ -6195,6 +6880,7 @@ static void init_igmp(struct net_if *iface)
 
 int net_if_up(struct net_if *iface)
 {
+	const struct device *dev;
 	int status = 0;
 
 	NET_DBG("iface %d (%p)", net_if_get_by_iface(iface), iface);
@@ -6206,30 +6892,19 @@ int net_if_up(struct net_if *iface)
 		goto out;
 	}
 
+	dev = net_if_get_device(iface);
+	NET_ASSERT(dev != NULL);
+
+	/* If the device is not ready it is pointless trying to take it up. */
+	if (!device_is_ready(dev)) {
+		NET_DBG("Device %s (%p) is not ready", dev->name, dev);
+		status = -ENXIO;
+		goto out;
+	}
+
 	/* If the L2 does not support enable just set the flag */
 	if (!net_if_l2(iface) || !net_if_l2(iface)->enable) {
 		goto done;
-	} else {
-		/* If the L2 does not implement enable(), then the network
-		 * device driver cannot implement start(), in which case
-		 * we can do simple check here and not try to bring interface
-		 * up as the device is not ready.
-		 *
-		 * If the network device driver does implement start(), then
-		 * it could bring the interface up when the enable() is called
-		 * few lines below.
-		 */
-		const struct device *dev;
-
-		dev = net_if_get_device(iface);
-		NET_ASSERT(dev);
-
-		/* If the device is not ready it is pointless trying to take it up. */
-		if (!device_is_ready(dev)) {
-			NET_DBG("Device %s (%p) is not ready", dev->name, dev);
-			status = -ENXIO;
-			goto out;
-		}
 	}
 
 	/* Notify L2 to enable the interface. Note that the interface is still down

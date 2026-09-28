@@ -148,6 +148,18 @@ These describe connections to cameras and displays (strictly speaking not shield
 - :dtcompatible:`weact,dcmi-camera-connector`
 
 
+ESP-01
+------
+
+This is an 8-pin header for ESP-01 Wi-Fi modules.
+
+Relevant devicetree node labels:
+
+- ``esp_01_header`` See :dtcompatible:`esp-01-header` for details on GPIO pin
+  definitions and includes for use in devicetree files.
+- ``esp_01_serial``
+
+
 Feather
 -------
 
@@ -204,6 +216,7 @@ Relevant devicetree node labels:
   technical specifications.
 - ``mikrobus_adc``
 - ``mikrobus_i2c``
+- ``mikrobus_pwm``
 - ``mikrobus_spi``
 - ``mikrobus_serial``
 
@@ -253,6 +266,71 @@ Relevant devicetree node labels:
   and includes for use in devicetree files.
 - ``st_morpho_lcd_spi``
 - ``st_morpho_flash_spi``
+
+
+ST Zio
+------
+
+STM32 Nucleo-144 development boards from ST Microelectronics expose the ST Zio
+connector, an extension of the Arduino Uno V3 connector that gives access to
+more of the STM32 I/Os through four headers (CN7, CN8, CN9 and CN10).
+
+Relevant devicetree node labels:
+
+- ``st_zio_header``  See :dtcompatible:`st-zio-header` for details on GPIO pin definitions
+  and includes for use in devicetree files.
+
+
+STMod+
+------
+
+This is a 20-pin expansion connector found on some STMicroelectronics Discovery
+and Evaluation boards.
+
+Relevant devicetree node labels:
+
+- ``stmod_plus_connector`` See :dtcompatible:`st,stmod-plus-connector` for
+  details on GPIO pin definitions and includes for use in devicetree files.
+- ``stmod_adc``
+- ``stmod_i2c``
+- ``stmod_pwm``
+- ``stmod_serial``
+- ``stmod_spi``
+
+Boards may expose additional interface labels when a peripheral is wired to the
+STMod+ connector and enabled in the board devicetree.
+
+
+WisBlock
+--------
+
+This is a modular interface standard for add-on boards, developed by RAKwireless.
+It defines Core, Sensor, I/O and Power Slots, each accepting a module of the
+matching class through a 24-pin or 40-pin WisConnector.
+
+.. figure:: ../../../boards/shields/rakwireless_rak19007/doc/img/rakwireless_rak19007.webp
+   :align: center
+   :alt: RAK19007 Base Board
+   :width: 300px
+
+   RAK19007, an example of a WisBlock Base Board (Credit: RAKwireless)
+
+Relevant devicetree node labels:
+
+- ``wisblock_io`` See :dtcompatible:`wisblock-io-slot` for GPIO pin definitions.
+- ``wisblock_sensor_a`` See :dtcompatible:`wisblock-sensor-slot` for GPIO pin definitions.
+- ``wisblock_adc``
+- ``wisblock_pwm``
+- ``wisblock_i2c1``
+- ``wisblock_i2c2``
+- ``wisblock_i2s``
+- ``wisblock_pdm``
+- ``wisblock_spi``
+- ``wisblock_uart0``
+- ``wisblock_uart1``
+
+Note that Sensor Slots are labeled ``wisblock_sensor_a`` through
+``wisblock_sensor_f`` after the Slot they implement.
 
 
 Xiao

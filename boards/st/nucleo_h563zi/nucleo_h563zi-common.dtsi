@@ -12,6 +12,10 @@
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
 / {
+	chosen {
+		zephyr,system-timer = &lptim4;
+	};
+
 	leds: leds {
 		compatible = "gpio-leds";
 
@@ -176,14 +180,17 @@
 	status = "okay";
 };
 
+&adc12_common {
+	st,adc-prescaler = <6>;
+	st,adc-clock-source = "ASYNC";
+	status = "okay";
+};
+
 &adc1 {
 	/* Zio A0, Zio D35, VBUS_SENSE */
 	pinctrl-0 = <&adc1_inp3_pa6 &adc1_inp15_pa3 &adc1_inp18_pa4>;
 	pinctrl-names = "default";
-	st,adc-clock-source = "ASYNC";
-	st,adc-prescaler = <6>;
 	status = "okay";
-
 	#address-cells = <1>;
 	#size-cells = <0>;
 
@@ -199,8 +206,6 @@
 };
 
 &adc2 {
-	st,adc-clock-source = "ASYNC";
-	st,adc-prescaler = <6>;
 	status = "okay";
 };
 
@@ -299,7 +304,7 @@ zephyr_udc0: &usb {
 	status = "okay";
 };
 
-stm32_lp_tick_source: &lptim4 {
+&lptim4 {
 	clocks = <&rcc STM32_CLOCK(APB3, 13)>,
 		 <&rcc STM32_SRC_LSI LPTIM4_SEL(4)>;
 	status = "okay";

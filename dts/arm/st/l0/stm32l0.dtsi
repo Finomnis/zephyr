@@ -199,6 +199,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			reg = <0x50000000 0x2000>;
+			ranges;
 
 			gpioa: gpio@50000000 {
 				compatible = "st,stm32-gpio";
@@ -360,13 +361,14 @@
 			status = "disabled";
 		};
 
-		adc1: adc@40012400 {
+		adc1_common: adc@40012400 {
 			compatible = "st,stm32-adc";
+			#address-cells = <1>;
+			#size-cells = <1>;
 			reg = <0x40012400 0x400>;
+			ranges;
 			clocks = <&rcc STM32_CLOCK(APB2, 9)>;
 			clock-names = "adcx";
-			interrupts = <12 0>;
-			#io-channel-cells = <1>;
 			st,adc-resolutions = <12 10 8 6>;
 			sampling-times = <2 4 8 13 20 40 80 161>;
 			num-sampling-time-common-channels = <1>;
@@ -374,13 +376,20 @@
 			st,adc-oversampler = "minimal";
 			st,adc-internal-regulator = "startup-sw-delay";
 			status = "disabled";
+
+			adc1: adc@40012400 {
+				reg = <0x40012400 0x100>;
+				interrupts = <12 0>;
+				#io-channel-cells = <1>;
+				status = "disabled";
+			};
 		};
 
 		dma1: dma@40020000 {
 			compatible = "st,stm32-dma-v2";
 			#dma-cells = <3>;
 			reg = <0x40020000 0x400>;
-			interrupts = <9 0 10 0 10 0 11 0 11 0 11 0 11 0>;
+			interrupts = <9 0>, <10 0>, <10 0>, <11 0>, <11 0>, <11 0>, <11 0>;
 			clocks = <&rcc STM32_CLOCK(AHB1, 0)>;
 			status = "disabled";
 		};

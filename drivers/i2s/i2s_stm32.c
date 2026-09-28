@@ -958,11 +958,11 @@ static const struct device *get_dev_from_tx_dma_channel(uint32_t dma_channel)
 /* src_dev and dest_dev should be 'MEMORY' or 'PERIPHERAL'. */
 #define I2S_DMA_CHANNEL_INIT(index, dir, dir_cap, src_dev, dest_dev)		\
 	.dir = {								\
-		.dev_dma = DEVICE_DT_GET(STM32_DMA_CTLR(index, dir)),		\
+		.dev_dma = DEVICE_DT_GET(STM32_DT_INST_DMA_CTLR(index, dir)),	\
 		.dma_channel = DT_INST_DMAS_CELL_BY_NAME(index, dir, channel),	\
 		.dma_cfg = {							\
 			.block_count = 2,					\
-			.dma_slot = STM32_DMA_SLOT(index, dir, slot),		\
+			.dma_slot = STM32_DT_INST_DMA_SLOT(index, dir),		\
 			.channel_direction = src_dev##_TO_##dest_dev,		\
 			.source_data_size = 2,  /* 16bit default */		\
 			.dest_data_size = 2,    /* 16bit default */		\
@@ -970,15 +970,15 @@ static const struct device *get_dev_from_tx_dma_channel(uint32_t dma_channel)
 			.source_burst_length = 2,				\
 			.dest_burst_length = 2,					\
 			.channel_priority = STM32_DMA_CONFIG_PRIORITY(		\
-				STM32_DMA_CHANNEL_CONFIG(index, dir)),		\
+				STM32_DT_INST_DMA_CHANNEL_CONFIG(index, dir)),	\
 			.dma_callback = dma_##dir##_callback,			\
 		},								\
 		.src_addr_increment = STM32_DMA_CONFIG_##src_dev##_ADDR_INC(	\
-					STM32_DMA_CHANNEL_CONFIG(index, dir)),	\
+			STM32_DT_INST_DMA_CHANNEL_CONFIG(index, dir)),		\
 		.dst_addr_increment = STM32_DMA_CONFIG_##dest_dev##_ADDR_INC(	\
-					STM32_DMA_CHANNEL_CONFIG(index, dir)),	\
+			STM32_DT_INST_DMA_CHANNEL_CONFIG(index, dir)),		\
 		.fifo_threshold = STM32_DMA_FEATURES_FIFO_THRESHOLD(		\
-					STM32_DMA_FEATURES(index, dir)),	\
+			STM32_DT_INST_DMA_FEATURES(index, dir)),		\
 		.stream_start = dir##_stream_start,				\
 		.stream_disable = dir##_stream_disable,				\
 		.msgq = &dir##_##index##_queue,					\
@@ -1002,10 +1002,10 @@ static const struct device *get_dev_from_tx_dma_channel(uint32_t dma_channel)
 		.ioswp = DT_INST_PROP(index, ioswp),				\
 	};									\
 										\
-	K_MSGQ_DEFINE(rx_##index##_queue, sizeof(struct queue_item),		\
-		      CONFIG_I2S_STM32_RX_BLOCK_COUNT, 4);			\
-	K_MSGQ_DEFINE(tx_##index##_queue, sizeof(struct queue_item),		\
-		      CONFIG_I2S_STM32_TX_BLOCK_COUNT, 4);			\
+	K_MSGQ_DEFINE_STATIC_TYPE(rx_##index##_queue, struct queue_item,	\
+				  CONFIG_I2S_STM32_RX_BLOCK_COUNT);		\
+	K_MSGQ_DEFINE_STATIC_TYPE(tx_##index##_queue, struct queue_item,	\
+				  CONFIG_I2S_STM32_TX_BLOCK_COUNT);		\
 										\
 	static struct i2s_stm32_data i2s_stm32_data_##index = {			\
 		IF_ENABLED(DT_INST_DMAS_HAS_NAME(index, rx),			\

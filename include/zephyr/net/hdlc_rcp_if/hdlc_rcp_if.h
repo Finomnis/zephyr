@@ -62,12 +62,19 @@ struct hdlc_api {
 	/**
 	 * @brief Deinitialize the device.
 	 *
-	 * @param none
-	 *
 	 * @retval 0 The interface was successfully stopped.
 	 * @retval -EIO The interface could not be stopped.
 	 */
 	int (*deinit)(void);
+
+	/**
+	 * @brief Optional: complete the RCP interface initialization in deferred init mode.
+	 * If NULL, the interface is started automatically at init.
+	 *
+	 * @retval 0 The interface was successfully started.
+	 * @retval -EIO The interface could not be started.
+	 */
+	int (*deferred_init)(void);
 };
 
 /* Make sure that the interface API is properly setup inside

@@ -153,15 +153,21 @@ int z_impl_k_pipe_write(struct k_pipe *pipe, const uint8_t *data, size_t len, k_
 {
 	int rc;
 	size_t written = 0;
+	size_t added;
 	k_timepoint_t end = sys_timepoint_calc(timeout);
 	k_spinlock_key_t key = k_spin_lock(&pipe->lock);
 	bool need_resched = false;
 
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_pipe, write, pipe, data, len, timeout);
 
+	if (unlikely(len > INT_MAX)) {
+		rc = -EOVERFLOW;
+		goto out;
+	}
+
 	if (unlikely(pipe_resetting(pipe))) {
 		rc = -ECANCELED;
-		goto exit;
+		goto out;
 	}
 
 	for (;;) {
@@ -193,12 +199,16 @@ int z_impl_k_pipe_write(struct k_pipe *pipe, const uint8_t *data, size_t len, k_
 			}
 		}
 
+		added = ring_buf_put(&pipe->buf, &data[written], len - written);
+
 #ifdef CONFIG_POLL
-		need_resched |= z_handle_obj_poll_events(&pipe->poll_events,
-							 K_POLL_STATE_PIPE_DATA_AVAILABLE);
+		if (added != 0) {
+			need_resched |= z_handle_obj_poll_events(&pipe->poll_events,
+								 K_POLL_STATE_PIPE_DATA_AVAILABLE);
+		}
 #endif /* CONFIG_POLL */
 
-		written += ring_buf_put(&pipe->buf, &data[written], len - written);
+		written += added;
 		if (likely(written == len)) {
 			rc = written;
 			break;
@@ -212,7 +222,7 @@ int z_impl_k_pipe_write(struct k_pipe *pipe, const uint8_t *data, size_t len, k_
 			break;
 		}
 	}
-exit:
+out:
 	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_pipe, write, pipe, rc);
 	if (need_resched) {
 		z_reschedule(&pipe->lock, key);
@@ -232,9 +242,14 @@ int z_impl_k_pipe_read(struct k_pipe *pipe, uint8_t *data, size_t len, k_timeout
 
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_pipe, read, pipe, data, len, timeout);
 
+	if (unlikely(len > INT_MAX)) {
+		rc = -EOVERFLOW;
+		goto out;
+	}
+
 	if (unlikely(pipe_resetting(pipe))) {
 		rc = -ECANCELED;
-		goto exit;
+		goto out;
 	}
 
 	for (;;) {
@@ -262,7 +277,7 @@ int z_impl_k_pipe_read(struct k_pipe *pipe, uint8_t *data, size_t len, k_timeout
 			break;
 		}
 	}
-exit:
+out:
 	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_pipe, read, pipe, rc);
 	if (need_resched) {
 		z_reschedule(&pipe->lock, key);
