@@ -80,6 +80,21 @@ Build System
   :kconfig:option:`CONFIG_WARN_DEPRECATED` can be used instead, simply replace lines with
   ``CONFIG_DEPRECATION_TEST=y`` with ``CONFIG_WARN_DEPRECATED=n``.
 
+* The hardening tool's data file :file:`scripts/kconfig/hardened.csv` has been replaced by a
+  YAML database: profiles in :file:`scripts/kconfig/hardening.yaml` and per-subsystem
+  ``hardening.yaml`` fragments next to the Kconfig files they relate to. Downstream forks that
+  patched the CSV should migrate their entries to the new format (see :ref:`hardening`); out-of-tree
+  recommendations no longer require patching the in-tree file at all and can instead be provided
+  via ``-DHARDENCONFIG_EXTRA_SOURCES=``. Note that ``CONFIG_DEBUG_COREDUMP`` was listed in the
+  CSV with a syntax error and was silently skipped; it is now actually checked, so
+  ``hardenconfig`` may report it as a new finding. Three CSV entries were dropped rather than
+  migrated: ``CONFIG_STACK_USAGE``, which only produces build-time :file:`.su` files and does not
+  affect the image, and ``CONFIG_MPU_STACK_GUARD`` and ``CONFIG_BUILTIN_STACK_GUARD``, which are
+  mutually exclusive mechanisms arbitrated by :kconfig:option:`CONFIG_HW_STACK_PROTECTION` —
+  recommending both flagged the wrong one on cores with stack pointer limit registers. Enabling
+  :kconfig:option:`CONFIG_HW_STACK_PROTECTION`, which is still recommended, lets the architecture
+  pick.
+
 Kernel
 ******
 
@@ -136,6 +151,32 @@ Kernel
   :c:enumerator:`K_OBJ_FUTEX` has been removed. Any user-accessible memory can
   be used as futex address. The error -EINVAL can no longer happen on futex
   operations.
+
+* The :ref:`object core framework <object_cores_api>` no longer links objects
+  into per-type lists through a node in the object. Statically defined objects
+  are enumerated in place and objects initialized at run time are referenced
+  from a bounded registry sized by
+  :kconfig:option:`CONFIG_OBJ_CORE_MAX_DYNAMIC_OBJECTS`. The ``node`` member of
+  :c:struct:`k_obj_core` and the ``list`` member of :c:struct:`k_obj_type` are
+  removed; tools that walked those lists must use
+  :c:func:`k_obj_type_walk_locked` or :c:func:`k_obj_type_walk_unlocked`.
+  :c:macro:`K_OBJ_TYPE_DEFINE` now defines the :c:struct:`k_obj_type` variable
+  itself, so a separate declaration of that variable must be dropped. Objects
+  located in a thread's stack or in the interrupt stack are no longer
+  registered, and :kconfig:option:`CONFIG_OBJ_CORE` selects
+  :kconfig:option:`CONFIG_THREAD_STACK_INFO`, which adds the stack information
+  fields to every :c:struct:`k_thread`. The new
+  :kconfig:option:`CONFIG_OBJ_CORE_QUEUE`, enabled by default, adds an object
+  core to every :c:struct:`k_queue`; as FIFOs and LIFOs embed a queue, they are
+  reported by both their own object type and the queue type.
+
+* Object tracking (:kconfig:option:`CONFIG_TRACING_OBJECT_TRACKING`) is now
+  provided by the object core framework, which it selects. The
+  ``_track_list_k_*`` list heads, the ``SYS_PORT_TRACK_NEXT()`` macro, the
+  ``sys_track_*_init()`` hooks and the :file:`include/zephyr/tracing/tracking.h`
+  header are removed. Code that walked the tracking lists must use
+  :c:func:`k_obj_type_walk_locked` or :c:func:`k_obj_type_walk_unlocked` with
+  the object type found by :c:func:`k_obj_type_find`.
 
 Boards
 ******
@@ -652,6 +693,10 @@ Controller Area Network (CAN)
   ``can_state_change_callbacks_enabled_t`` as needed. Drivers must now use
   :c:func:`can_fire_state_change_callbacks` for firing CAN controller state change callbacks
   (:github:`117889`).
+
+* The CAN bus network driver (:kconfig:option:`CONFIG_NET_CANBUS`) now defines a network interface
+  for each CAN controller device defined with :c:macro:`CAN_DEVICE_DT_DEFINE` or
+  :c:macro:`CAN_DEVICE_DT_INST_DEFINE`, instead of one for the ``zephyr,canbus`` chosen node.
 
 Counter
 =======

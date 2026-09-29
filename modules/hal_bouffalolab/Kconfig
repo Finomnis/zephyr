@@ -40,6 +40,21 @@ config BFLB_AOS_SHIM
 	  OS shim for the BL808 on-chip BLE controller blob.
 	  Implements aos_*, bl_irq_*, and platform functions.
 
+config BFLB_BL602_OS_SHIM
+	bool
+	help
+	  Zephyr port of the bl_ops_funcs OS abstraction table the BL602
+	  wifi4 firmware blob uses for all RTOS primitives (heap, mutex,
+	  semaphore, task, timer, IRQ, message queue, event group).
+	  Selected by the BL60x WiFi driver.
+
+config BFLB_PHYRF
+	bool
+	help
+	  Link the shared PHY/RF binary blob of the SoC being built
+	  (e.g. libbl616_phyrf.a on BL61x). Selected by the Bouffalo Lab
+	  BLE, WiFi and IEEE 802.15.4 drivers.
+
 config BFLB_SHIM_HEAP_SIZE
 	int "BLE shim heap size"
 	default 8192

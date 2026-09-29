@@ -313,6 +313,12 @@ Removed APIs and options
 
     * ``stream_flash_erase_page()``
 
+* Tracing
+
+  * The ``_track_list_k_*`` object tracking list heads, ``SYS_PORT_TRACK_NEXT()`` and
+    :file:`include/zephyr/tracing/tracking.h`. Object tracking now enumerates objects through
+    the :ref:`object core framework <object_cores_api>`.
+
 * ZTest
 
     * ``CONFIG_ZTEST_SHUFFLE_SUITE_REPEAT_COUNT``
@@ -745,6 +751,10 @@ New APIs and options
 
 * Kernel
 
+  * :c:func:`k_obj_core_evict_range`
+  * :kconfig:option:`CONFIG_OBJ_CORE_MAX_DYNAMIC_OBJECTS`
+  * :kconfig:option:`CONFIG_OBJ_CORE_EVICT_ON_FREE`
+  * :kconfig:option:`CONFIG_OBJ_CORE_QUEUE`
   * :c:func:`k_thread_runtime_stats_is_enabled`
   * :c:func:`atomic_test_and_set_bit_to`
   * :c:macro:`K_MSGQ_DEFINE_STATIC`
@@ -888,6 +898,8 @@ New APIs and options
     :kconfig:option:`CONFIG_SNTP_LIB`.
   * Add :c:func:`dns_resolve_is_active` to check whether a DNS resolving
     context is active without reading the context internals.
+  * Add :c:func:`coap_client_reregister_observe` to refresh an ongoing CoAP
+    observation (:rfc:`7641` re-registration) without tearing it down.
 
 * POSIX
 
@@ -938,6 +950,10 @@ New APIs and options
 * USB Type-C
 
   * :kconfig:option:`CONFIG_USBC_LOG_PD_MSG_NAMES`
+
+* Utilities
+
+  * :c:macro:`ARGS_UNUSED` to mark multiple arguments as unused.
 
 * Zbus
 
@@ -2065,6 +2081,8 @@ New Samples
 * :zephyr:code-sample:`nxp_mcx_s2ram`
 * :zephyr:code-sample:`nxp_mcx_system_off`
 * :zephyr:code-sample:`nxp_smartdma_mem_to_mem`
+* :zephyr:code-sample:`object_cores`
+* :zephyr:code-sample:`object_monitor`
 * :zephyr:code-sample:`pm-latency`
 * :zephyr:code-sample:`pulse_io_byte_transfer`
 * :zephyr:code-sample:`qdec_multi`
@@ -2250,7 +2268,24 @@ Other notable changes
     Ubuntu 24.04 LTS package repositories. See the :ref:`migration guide <migration_4.5>` for
     options if your distribution ships an older version.
 
+  * The :ref:`hardening tool <hardening>` (``west build -t hardenconfig``) now sources its
+    recommendations from a schema-validated YAML database instead of a CSV file: profiles in
+    :file:`scripts/kconfig/hardening.yaml` and per-subsystem ``hardening.yaml`` fragments living
+    next to the Kconfig files they relate to. Every recommendation now carries a rationale,
+    displayed in the report, and may reference CWE/CVE entries; recommendations are grouped into
+    profiles (``base`` and ``strict``, selectable with ``-DHARDENCONFIG_PROFILE=``); integer
+    recommendations can express minimum/maximum constraints; JSON output and a failing exit code
+    are available for CI use; and out-of-tree databases can be layered with
+    ``-DHARDENCONFIG_EXTRA_SOURCES=``. The database is validated in CI against the actual Kconfig
+    tree so entries can no longer go stale.
+
 * Kernel
+
+  * The :ref:`object core framework <object_cores_api>` no longer keeps registry state inside
+    the objects it tracks. Statically defined objects are enumerated in place and objects
+    initialized at run time are referenced from a bounded registry, so a kernel object may be
+    declared on a stack, embedded in freed memory or initialized again without corrupting the
+    registry. Objects in stack storage are not tracked.
 
   * :kconfig:option:`CONFIG_SCHED_CPU_MASK` no longer depends on
     :kconfig:option:`CONFIG_SCHED_SIMPLE`.  CPU affinity masks are now
