@@ -424,6 +424,17 @@ Deprecated APIs and options
   * Renamed :c:func:`lora_recv_duty_cycle` to :c:func:`lora_recv_duty_cycle_async`
     to be consistent with the existing sync/async naming convention.
 
+* MCUmgr
+
+  * The :c:type:`smp_transport_get_mtu_fn` type and the ``get_mtu`` member of
+    :c:struct:`smp_transport_api_t` have been deprecated, as the SMP layer does not use them.
+    See the :ref:`migration guide <migration_4.5>` for details.
+
+  * :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_UART_MTU` and
+    :kconfig:option:`CONFIG_MCUMGR_TRANSPORT_SHELL_MTU` have been deprecated, as they only set the
+    value returned by the deprecated ``get_mtu`` callback. See the
+    :ref:`migration guide <migration_4.5>` for details.
+
 * Nordic
 
   * The internal SoC platform Kconfig symbols ``NRF_PLATFORM_HALTIUM`` and
@@ -621,6 +632,8 @@ New APIs and options
 
   * Host
 
+    * :c:func:`bt_att_get_max_notify_size`
+    * :c:func:`bt_att_get_max_indicate_size`
     * :c:func:`bt_conn_take`
     * :c:func:`bt_conn_drop`
     * :c:func:`bt_id_reset_irk`
@@ -900,6 +913,8 @@ New APIs and options
     context is active without reading the context internals.
   * Add :c:func:`coap_client_reregister_observe` to refresh an ongoing CoAP
     observation (:rfc:`7641` re-registration) without tearing it down.
+  * :c:func:`net_config_init_clock_via_sntp` to set system clock via SNTP.
+  * :c:func:`net_config_sntp_set_server`
 
 * POSIX
 
@@ -1836,6 +1851,16 @@ New Drivers
       statically configured time receiver, so it can synchronize through IEEE 802.1AS
       automotive profile bridges that transmit no Announce messages.
 
+  * IGMP
+
+    * Hosts now answer Group-Specific Queries, delay query responses by a random time within
+      the Max Resp Time, retransmit the unsolicited report of a join and switch to IGMPv1 or
+      IGMPv2 when a querier of that version is present, as required by :rfc:`2236` and :rfc:`3376`.
+      The number of report transmissions follows the new
+      :kconfig:option:`CONFIG_NET_IPV4_IGMP_ROBUSTNESS`. Queries without the IP Router Alert
+      option are ignored when :kconfig:option:`CONFIG_NET_IPV4_IGMP_REQUIRE_ROUTER_ALERT`
+      is enabled.
+
   * :dtcompatible:`st,stm32wba-radio` (:github:`110546`)
 
 * :abbr:`OPAMP (Operational Amplifier)`
@@ -2160,6 +2185,16 @@ Libraries / Subsystems
     the Semtech LoRaMac-node dependency.  Currently supports the EU868 region.
   * :c:member:`lora_modem_config.sync_word`
 
+* Networking
+
+  * Added tracking of local ports bound through offloaded sockets
+    (:kconfig:option:`CONFIG_NET_SOCKETS_OFFLOAD_PORT_TRACKING`). Offloaded
+    sockets bind in the offload engine, outside the ``net_context`` layer, so
+    :c:func:`net_context_port_in_use` could not see them. The socket layer now
+    tracks those bindings and provides ``net_socket_port_in_use()`` to check
+    both native and offloaded ports. mDNS probe port selection and DNS-SD
+    service checks use this new function.
+
 * Management
 
   * MCUmgr
@@ -2339,12 +2374,29 @@ Other notable changes
     behind the failure. The supplicant fills these in, and the Wi-Fi shell prints
     them with the connection and disconnection results. (:github:`116704`)
 
+  * The ESP32 Wi-Fi driver gained 802.11k/v/r and MBO support, all off by
+    default. :kconfig:option:`CONFIG_ESP32_WIFI_11KV_SUPPORT` turns on 802.11k
+    and 802.11v, :kconfig:option:`CONFIG_ESP32_WIFI_MBO_SUPPORT` turns on MBO
+    on top of them, and :kconfig:option:`CONFIG_ESP32_WIFI_11R_SUPPORT` turns
+    on 802.11r. The ``wifi 11k`` and ``wifi 11v_btm_query`` shell commands now
+    work on ESP32 while the station is associated, and
+    :kconfig:option:`CONFIG_ESP32_WIFI_SIGNAL_CHANGE_EVENT` raises
+    :c:macro:`NET_EVENT_WIFI_SIGNAL_CHANGE` when the signal of the connected
+    access point weakens, for an application that decides when to roam.
+
   * The transmit power ceiling properties in ``wifi-tx-power-2g.yaml`` and
     ``wifi-tx-power-5g.yaml`` are no longer ``required`` and now carry
     conservative defaults, so a board that has not been characterised errs on
     the side of transmitting too little rather than exceeding a regulatory
     limit. Boards that have measured their own limits continue to state them
     explicitly, so no board changes behaviour.
+
+  * P2P gained shell commands to set the local device name and to query the
+    current P2P status, backed by the new :c:enumerator:`WIFI_P2P_SET_DEV_NAME`
+    and :c:enumerator:`WIFI_P2P_STATUS` :c:enum:`wifi_p2p_op` operations. The
+    corresponding ``device_name`` and ``status`` members were added to
+    :c:struct:`wifi_p2p_params`, along with the new
+    :c:macro:`WIFI_P2P_STATUS_BUF_SIZE` buffer-size macro.
 
 * MCUboot
 

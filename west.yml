@@ -125,7 +125,7 @@ manifest:
       revision: 45d23287f5b41be49612281a5e7c802c6a415388
       path: modules/lib/cmsis-dsp
     - name: cmsis-nn
-      revision: d20117c9e88cf9018d6fa06744dddac700c3e3a1
+      revision: 73591f72850bfebe95c6f30f6e75a773abb711cd
       path: modules/lib/cmsis-nn
     - name: cmsis_6
       repo-path: CMSIS_6
@@ -172,7 +172,7 @@ manifest:
       groups:
         - hal
     - name: hal_espressif
-      revision: 0bd7ba4cdeb218fad291ae06f728c335a97e588d
+      revision: b16851b3c20e6fad3d2da42ec24a3e82d0b8b444
       path: modules/hal/espressif
       west-commands: west/west-commands.yml
       groups:
@@ -193,7 +193,7 @@ manifest:
       groups:
         - hal
     - name: hal_intel
-      revision: 71e18c0f225e5941cc1fc84f0ae35d61d9c654d0
+      revision: 884c7a79a48efef50bc0d12c86f5d0951748f24d
       path: modules/hal/intel
       groups:
         - hal
@@ -203,7 +203,7 @@ manifest:
       groups:
         - hal
     - name: hal_nordic
-      revision: 58c060befc11f3029212bf4246fd3ca471328861
+      revision: c708b9fe1b7a36090c468374811a6e934b97e54a
       path: modules/hal/nordic
       groups:
         - hal
@@ -235,12 +235,12 @@ manifest:
         - hal
     - name: hal_renesas
       path: modules/hal/renesas
-      revision: a843129f7cb8d048bcb9bcd46bbfebf66b9cbe7c
+      revision: 55d5b9e0341b8dc7612fca4e2f13d6086984709a
       groups:
         - hal
     - name: hal_rpi_pico
       path: modules/hal/rpi_pico
-      revision: 266394b0f23dff8f77c54f67f89d62cee246f21d
+      revision: 2e9dbf14fa56e5907aefb07e8e75010ec5210946
       groups:
         - hal
     - name: hal_sifli
@@ -254,7 +254,7 @@ manifest:
       groups:
         - hal
     - name: hal_st
-      revision: e9f0468ade3c06d5e3961e3821543dd67c7ea7f0
+      revision: ce795a9b0de623022c17d2ff394587c024aec850
       path: modules/hal/st
       groups:
         - hal
@@ -295,7 +295,7 @@ manifest:
         - hal
     - name: hostap
       path: modules/lib/hostap
-      revision: 63a13bed13fcee519496e855488610452d23746c
+      revision: 1c541a0913058912376bb832fb753161978c266b
     - name: liblc3
       revision: 48bbd3eacd36e99a57317a0a4867002e0b09e183
       path: modules/lib/liblc3
@@ -330,7 +330,7 @@ manifest:
       groups:
         - crypto
     - name: mcuboot
-      revision: c85af35b875d244cf91f8ec3caa04168fc7f1ec1
+      revision: a8ffd2c312910cc648219bcb29e04260f7857492
       path: bootloader/mcuboot
       groups:
         - bootloader
@@ -348,7 +348,7 @@ manifest:
       revision: 0f6d088e777a33dd7b54297f137ef10d745c5da8
       path: modules/lib/nanopb
     - name: net-tools
-      revision: 6a7baee0a2bb60d56523277ddee2c4846ea2b62f
+      revision: 96ecb88c982812d48564d319cf7d9a0709c85c70
       path: tools/net-tools
       groups:
         - tools

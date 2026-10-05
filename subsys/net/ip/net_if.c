@@ -498,6 +498,7 @@ enum net_verdict net_if_try_send_data(struct net_if *iface, struct net_pkt *pkt,
 	struct net_context *context = net_pkt_context(pkt);
 	struct net_linkaddr *dst = net_pkt_lladdr_dst(pkt);
 	enum net_verdict verdict = NET_OK;
+	net_sa_family_t family;
 	int status = -EIO;
 
 	if (!net_if_flag_is_set(iface, NET_IF_LOWER_UP) ||
@@ -560,12 +561,18 @@ enum net_verdict net_if_try_send_data(struct net_if *iface, struct net_pkt *pkt,
 
 	/* If the ll dst address is not set check if it is present in the nbr
 	 * cache.
+	 *
+	 * The family is read once, before the call. A prepare function that
+	 * returns NET_CONTINUE has handed the packet over (IPv6 neighbor
+	 * discovery pending queue, fragmentation): it can be sent, freed and
+	 * its memory reused by another packet before this thread runs again,
+	 * so the packet must not be looked at after the call.
 	 */
-	if (IS_ENABLED(CONFIG_NET_IPV6) && net_pkt_family(pkt) == NET_AF_INET6) {
-		verdict = net_ipv6_prepare_for_send(pkt);
-	}
+	family = net_pkt_family(pkt);
 
-	if (IS_ENABLED(CONFIG_NET_IPV4) && net_pkt_family(pkt) == NET_AF_INET) {
+	if (IS_ENABLED(CONFIG_NET_IPV6) && family == NET_AF_INET6) {
+		verdict = net_ipv6_prepare_for_send(pkt);
+	} else if (IS_ENABLED(CONFIG_NET_IPV4) && family == NET_AF_INET) {
 		verdict = net_ipv4_prepare_for_send(pkt);
 	}
 
@@ -4327,6 +4334,14 @@ static void ipv4_config_defaults_set(struct net_if_ipv4 *ipv4)
 	ipv4->ttl = CONFIG_NET_INITIAL_TTL;
 	ipv4->mcast_ttl = CONFIG_NET_INITIAL_MCAST_TTL;
 
+#if defined(CONFIG_NET_IPV4_IGMP)
+	ipv4->igmp_general_timeout = sys_timepoint_calc(K_FOREVER);
+	/* No older version querier heard: the timers have expired */
+	ipv4->igmp_v1_querier_timeout = sys_timepoint_calc(K_NO_WAIT);
+	ipv4->igmp_v2_querier_timeout = sys_timepoint_calc(K_NO_WAIT);
+	ipv4->igmp_version = 0U;
+#endif
+
 	IF_ENABLED(CONFIG_NET_IPV4_ACD, (ipv4->conflict_cnt = 0));
 }
 #else
@@ -5737,6 +5752,11 @@ struct net_if_mcast_addr *net_if_ipv4_maddr_add(struct net_if *iface,
 		maddr->is_joined = false;
 		maddr->address.family = NET_AF_INET;
 		maddr->address.in_addr.s4_addr32[0] = addr->s4_addr32[0];
+#if defined(CONFIG_NET_IPV4_IGMP)
+		maddr->igmp_resp_timeout = sys_timepoint_calc(K_FOREVER);
+		maddr->igmp_retx_timeout = sys_timepoint_calc(K_FOREVER);
+		maddr->igmp_retx_left = 0U;
+#endif
 #if defined(CONFIG_NET_IPV4_IGMPV3)
 		maddr->sources_len = 0;
 #endif
