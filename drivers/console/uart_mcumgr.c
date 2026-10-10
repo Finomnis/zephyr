@@ -12,6 +12,7 @@
 
 #include <string.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/mgmt/mcumgr/transport/serial.h>
 #include <zephyr/drivers/console/uart_mcumgr.h>
@@ -39,6 +40,14 @@ static bool uart_mcumgr_ignoring;
 /** Contains buffers to hold incoming request fragments. */
 K_MEM_SLAB_DEFINE_TYPE(uart_mcumgr_slab, struct uart_mcumgr_rx_buf,
 		       CONFIG_UART_MCUMGR_RX_BUF_COUNT);
+
+#if !defined(CONFIG_MCUMGR_TRANSPORT_UART_ASYNC)
+/**
+ * Whether reception is paused because no receive buffer is available.  It is
+ * resumed when a buffer is freed.
+ */
+static atomic_t uart_mcumgr_rx_paused;
+#endif
 
 #if defined(CONFIG_MCUMGR_TRANSPORT_UART_ASYNC)
 uint8_t async_buffer[CONFIG_MCUMGR_TRANSPORT_UART_ASYNC_BUFS]
@@ -68,17 +77,13 @@ void uart_mcumgr_free_rx_buf(struct uart_mcumgr_rx_buf *rx_buf)
 
 	block = rx_buf;
 	k_mem_slab_free(&uart_mcumgr_slab, block);
-}
 
 #if !defined(CONFIG_MCUMGR_TRANSPORT_UART_ASYNC)
-/**
- * Reads a chunk of received data from the UART.
- */
-static int uart_mcumgr_read_chunk(void *buf, int capacity)
-{
-	return uart_fifo_read(uart_mcumgr_dev, buf, capacity);
-}
+	if (atomic_cas(&uart_mcumgr_rx_paused, 1, 0)) {
+		uart_irq_rx_enable(uart_mcumgr_dev);
+	}
 #endif
+}
 
 /**
  * Processes a single incoming byte.
@@ -186,14 +191,45 @@ static void uart_mcumgr_async(const struct device *dev, struct uart_event *evt, 
 }
 #else
 /**
+ * Makes sure that a receive buffer is available for the next incoming byte.
+ */
+static bool uart_mcumgr_rx_buf_ready(void)
+{
+#if !defined(CONFIG_UART_MCUMGR_RAW_PROTOCOL)
+	if (uart_mcumgr_ignoring) {
+		return true;
+	}
+#endif
+
+	if (uart_mcumgr_cur_buf == NULL) {
+		uart_mcumgr_cur_buf = uart_mcumgr_alloc_rx_buf();
+	}
+
+	return uart_mcumgr_cur_buf != NULL;
+}
+
+/**
+ * Whether the UART throttles the sender while no data is read from it.
+ */
+static bool uart_mcumgr_flow_ctrl_enabled(void)
+{
+	struct uart_config cfg;
+
+	if (uart_config_get(uart_mcumgr_dev, &cfg) == 0) {
+		return cfg.flow_ctrl != UART_CFG_FLOW_CTRL_NONE;
+	}
+
+	/* Runtime configuration is not available, use the devicetree setting */
+	return DT_PROP_OR(DT_CHOSEN(zephyr_uart_mcumgr), hw_flow_control, false);
+}
+
+/**
  * ISR that is called when UART bytes are received.
  */
 static void uart_mcumgr_isr(const struct device *unused, void *user_data)
 {
 	struct uart_mcumgr_rx_buf *rx_buf;
-	uint8_t buf[32];
-	int chunk_len;
-	int i;
+	uint8_t byte;
 
 	ARG_UNUSED(unused);
 	ARG_UNUSED(user_data);
@@ -205,16 +241,36 @@ static void uart_mcumgr_isr(const struct device *unused, void *user_data)
 	}
 
 	while (true) {
-		chunk_len = uart_mcumgr_read_chunk(buf, sizeof(buf));
-		if (chunk_len <= 0) {
+		if (!uart_mcumgr_rx_buf_ready() && uart_mcumgr_flow_ctrl_enabled()) {
+			/* Leave the data in the UART so that the sender gets
+			 * throttled instead of losing fragments. Reception is
+			 * resumed by uart_mcumgr_free_rx_buf().
+			 *
+			 * Without flow control, the data would be lost in the
+			 * UART anyway, so keep reading and drop the fragment.
+			 */
+			atomic_set(&uart_mcumgr_rx_paused, 1);
+			uart_irq_rx_disable(uart_mcumgr_dev);
+
+			/* A buffer may have been freed before reception was paused */
+			if (!uart_mcumgr_rx_buf_ready()) {
+				break;
+			}
+
+			atomic_clear(&uart_mcumgr_rx_paused);
+			uart_irq_rx_enable(uart_mcumgr_dev);
+		}
+
+		/* Read byte by byte, as a single read could otherwise span into
+		 * a fragment for which no buffer is available.
+		 */
+		if (uart_fifo_read(uart_mcumgr_dev, &byte, 1) <= 0) {
 			break;
 		}
 
-		for (i = 0; i < chunk_len; i++) {
-			rx_buf = uart_mcumgr_rx_byte(buf[i]);
-			if (rx_buf != NULL) {
-				uart_mcumgr_recv_cb(rx_buf);
-			}
+		rx_buf = uart_mcumgr_rx_byte(byte);
+		if (rx_buf != NULL) {
+			uart_mcumgr_recv_cb(rx_buf);
 		}
 	}
 }
