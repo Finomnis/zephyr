@@ -243,6 +243,21 @@ config UART_MCUMGR_RX_BUF_COUNT
 	  SMP handling code which will directly be put into a netbuf, therefore unlike SMP over
 	  console, the value of this should not need to be changed from the default.
 
+DT_CHOSEN_ZEPHYR_UART_MCUMGR := zephyr,uart-mcumgr
+
+config UART_MCUMGR_RX_FLOW_CONTROL
+	bool "Pause reception while no receive buffer is available"
+	depends on !MCUMGR_TRANSPORT_UART_ASYNC
+	default y if $(dt_chosen_bool_prop,$(DT_CHOSEN_ZEPHYR_UART_MCUMGR),hw-flow-control)
+	help
+	  When all receive buffers are in use, disable UART RX interrupts instead of dropping the
+	  incoming data, and re-enable them once a buffer is freed. The data stays in the UART,
+	  which throttles the sender, so no fragments are lost however slowly they are processed.
+
+	  This requires flow control on the UART, and a driver that invokes the interrupt
+	  callback again when RX interrupts are re-enabled while data is pending, such as the
+	  USB CDC ACM driver. Without flow control, the data would be lost in the UART instead.
+
 config UART_MCUMGR_RAW_PROTOCOL
 	bool "Raw (non-SMP over console) protocol"
 	help
